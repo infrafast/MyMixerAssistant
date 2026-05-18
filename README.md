@@ -37,13 +37,14 @@ A voice-enabled AI personal assistant that leverages the Model Context Protocol 
 
 ## Features
 
-- 🎤 **Voice Input**: Real-time speech-to-text using OpenAI Whisper
-- 🔊 **Voice Output**: High-quality text-to-speech using ElevenLabs (with pyttsx3 fallback)
+- 🎤 **Voice Input**: Real-time speech-to-text using OpenAI Whisper API or local Whisper
+- 🔊 **Voice Output**: High-quality text-to-speech using ElevenLabs, pyttsx3, or no spoken output
 - 🤖 **AI-Powered**: Conversational AI with memory persistence
-- 🌐 **Multiple Model Providers**: Works with any LLM provider that supports tool calling (OpenAI, Anthropic, Groq, LLama, etc.)
+- 🌐 **Multiple Model Providers**: Works with OpenAI or local Ollama models that support tool calling
 - 🛠️ **Multi-Tool Integration**: Seamlessly connects to any MCP servers:
 - 💾 **Conversational Memory**: Maintains context across interactions
 - 🎯 **Extensible**: Easy to add new MCP servers and capabilities
+- 📴 **Offline Mode**: Can run with Ollama, local Whisper, pyttsx3, and local MCP servers after models/packages are installed
 
 ## Architecture
 
@@ -53,6 +54,7 @@ A voice-enabled AI personal assistant that leverages the Model Context Protocol 
 │   Input     │     │ Text (STT)   │     │  MCPAgent   │     │ Speech (TTS) │
 └─────────────┘     └──────────────┘     └─────────────┘     └──────────────┘
                          Whisper                 │                ElevenLabs
+                    API or local                 │                or pyttsx3
                                                  │
                                           ┌──────▼──────┐
                                           │ MCP Servers │
@@ -74,6 +76,7 @@ A voice-enabled AI personal assistant that leverages the Model Context Protocol 
    - macOS: `brew install portaudio`
    - Ubuntu/Debian: `sudo apt-get install portaudio19-dev`
    - Windows: PyAudio wheel includes PortAudio
+5. **Ollama** (optional, required for offline LLM mode)
 
 
 ### Install from Source
@@ -99,6 +102,34 @@ uv pip install -e .
 uv pip install .
 ```
 
+### Offline Preparation
+
+Offline mode works only after the required Python packages, Node packages, Ollama model, and Whisper model are already available locally.
+
+1. Install dependencies while online:
+```bash
+uv pip install -e .
+```
+
+2. Install and start Ollama, then pull a tool-capable model:
+```bash
+ollama serve
+ollama pull qwen3:8b
+```
+
+3. Download/cache the local Whisper model once:
+```bash
+python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='auto', compute_type='int8')"
+```
+
+4. Run the local MCP server packages used by `mcp_servers.offline.json`:
+```bash
+npx -y @modelcontextprotocol/server-filesystem
+npx -y @modelcontextprotocol/server-memory --help
+```
+
+The offline MCP config uses `npx --offline`, so it will fail instead of reaching the network if those packages were not cached first. After those steps, the assistant can run without OpenAI or ElevenLabs API keys when using Ollama, local Whisper, pyttsx3, and the offline MCP config.
+
 ## Configuration
 
 ### Environment Variables
@@ -106,15 +137,11 @@ uv pip install .
 Create a `.env` file in your project root (see `.env.example` for a complete template):
 
 ```bash
-# Required
+# Required only when using OpenAI LLM or OpenAI Whisper API
 OPENAI_API_KEY=your-openai-api-key
 
 # Optional but recommended for better voice output
 ELEVENLABS_API_KEY=your-elevenlabs-api-key
-
-# Optional - Model Provider Settings
-# You can use any model provider that supports tool calling
-OPENAI_API_KEY=your-openai-api-key              # Required for Whisper STT
 
 # LLM provider selection
 LLM_PROVIDER=openai                             # openai | ollama
@@ -123,9 +150,14 @@ OPENAI_MODEL=gpt-4o-mini                        # OpenAI: gpt-4o-mini, gpt-4o, g
 # Ollama local settings (when LLM_PROVIDER=ollama)
 OLLAMA_BASE_URL=http://localhost:11434
 # OPENAI_MODEL=qwen3:8b                         # Example Ollama model tag
-# Or use other providers:
-# ANTHROPIC_MODEL=claude-3-5-sonnet-20240620   # Anthropic Claude
-# GROQ_MODEL=llama3-8b-8192                    # Groq LLama
+
+# Speech-to-text settings
+STT_PROVIDER=openai-whisper                     # openai-whisper | local-whisper
+LOCAL_WHISPER_MODEL=base                        # faster-whisper model size or local model path
+STT_LANGUAGE=en                                 # en, fr, etc.; use auto for auto-detect
+
+# Text-to-speech settings
+TTS_PROVIDER=elevenlabs                         # elevenlabs | pyttsx3 | none
 
 # Voice Settings
 ELEVENLABS_VOICE_ID=ZF6FPAbjXT4488VcRRnw      # Default: Rachel voice
@@ -136,6 +168,7 @@ VOICE_SILENCE_DURATION=1.5                      # Seconds to wait after speech
 
 # Optional - Assistant Configuration
 ASSISTANT_SYSTEM_PROMPT="You are a helpful voice assistant..."  # Customize personality
+MCP_CONFIG=mcp_servers.offline.json             # Optional config override
 
 # Optional - MCP Server Specific
 LINEAR_API_KEY=your-linear-api-key              # For Linear integration
@@ -149,6 +182,15 @@ The assistant loads MCP server configurations from `mcp_servers.json` in the pro
 
 - **playwright**: Web automation and browser control
 - **linear**: Task and project management
+
+For offline mode, use `mcp_servers.offline.json`:
+
+- **filesystem**: local filesystem access inside the configured root
+- **memory**: local MCP memory server
+
+```bash
+python voice_assistant/agent.py --mcp-config mcp_servers.offline.json
+```
 
 To add more servers, edit `mcp_servers.json` or copy `mcp_servers.example.json` which includes additional servers like:
 - filesystem, github, gitlab, google-drive, postgres, sqlite, slack, memory, puppeteer, brave-search, fetch
@@ -184,14 +226,25 @@ python voice_assistant/agent.py
 # Override specific settings via command line
 python voice_assistant/agent.py --model gpt-4o-mini --silence-threshold 300
 
-# Use Ollama local model (with OpenAI fallback if Ollama init fails)
+# Use Ollama local model
 python voice_assistant/agent.py --llm-provider ollama --model qwen3:8b
+
+# Offline mode after local models and MCP packages are cached
+python voice_assistant/agent.py \
+  --llm-provider ollama \
+  --model qwen3:8b \
+  --stt-provider local-whisper \
+  --local-whisper-model base \
+  --tts-provider pyttsx3 \
+  --mcp-config mcp_servers.offline.json
 
 # Provide all settings via command line (no .env needed)
 python voice_assistant/agent.py \
   --openai-api-key YOUR_KEY \
   --elevenlabs-api-key YOUR_ELEVENLABS_KEY \
   --model gpt-4 \
+  --stt-provider openai-whisper \
+  --tts-provider elevenlabs \
   --voice-id ZF6FPAbjXT4488VcRRnw \
   --silence-threshold 500 \
   --silence-duration 1.5
@@ -200,42 +253,30 @@ python voice_assistant/agent.py \
 python voice_assistant/agent.py --help
 ```
 
-**Note**: Command-line arguments take precedence over environment variables.
+**Note**: Command-line arguments take precedence over environment variables. `OPENAI_API_KEY` is not required when both `--llm-provider ollama` and `--stt-provider local-whisper` are used.
 
 
 ### Changing Model Provider
 
-The voice assistant supports multiple LLM providers through LangChain. Any model with tool calling capabilities can be used:
+The voice assistant supports OpenAI and Ollama through LangChain. Any selected model must support tool calling.
 
 ```python
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-from langchain_groq import ChatGroq
-
 # Using OpenAI (default)
 assistant = VoiceAssistant(
     openai_api_key="your-key",
-    model="gpt-4"  # or gpt-4-turbo, gpt-3.5-turbo
+    model="gpt-4o-mini",
+    llm_provider="openai",
+    stt_provider="openai-whisper",
+    tts_provider="elevenlabs",
 )
 
-# Using Anthropic Claude
-llm = ChatAnthropic(
-    api_key="your-anthropic-key",
-    model="claude-3-5-sonnet-20240620"
-)
+# Using Ollama, local Whisper, and local pyttsx3
 assistant = VoiceAssistant(
-    llm=llm,  # Pass custom LLM instance
-    elevenlabs_api_key="your-key"
-)
-
-# Using Groq
-llm = ChatGroq(
-    api_key="your-groq-key",
-    model="llama3-8b-8192"
-)
-assistant = VoiceAssistant(
-    llm=llm,
-    elevenlabs_api_key="your-key"
+    model="qwen3:8b",
+    llm_provider="ollama",
+    stt_provider="local-whisper",
+    local_whisper_model="base",
+    tts_provider="pyttsx3",
 )
 ```
 
@@ -259,11 +300,25 @@ ollama pull qwen3:8b
 python voice_assistant/agent.py --llm-provider ollama --model qwen3:8b
 ```
 
+For a full offline run, also select local Whisper, local TTS, and local MCP config:
+```bash
+python voice_assistant/agent.py \
+  --llm-provider ollama \
+  --model qwen3:8b \
+  --stt-provider local-whisper \
+  --tts-provider pyttsx3 \
+  --mcp-config mcp_servers.offline.json
+```
+
 You can also configure this via `.env`:
 ```bash
 LLM_PROVIDER=ollama
 OPENAI_MODEL=qwen3:8b
 OLLAMA_BASE_URL=http://localhost:11434
+STT_PROVIDER=local-whisper
+LOCAL_WHISPER_MODEL=base
+TTS_PROVIDER=pyttsx3
+MCP_CONFIG=mcp_servers.offline.json
 ```
 
 compatibles models for an imac 24Gb could be:
@@ -273,17 +328,18 @@ compatibles models for an imac 24Gb could be:
 - command-r-plus (si tu acceptes plus de latence/ressources) Très bon en usage “tools/RAG”, mais plus coûteux localement.
 
 
-If Ollama initialization fails, the app falls back to OpenAI automatically.
+When `LLM_PROVIDER=ollama`, the app stays on Ollama. Start `ollama serve` and pull the selected model before running the assistant.
 
 
 ### Changing Voice Settings
 
-Pass different parameters when initializing:
+Pass different parameters when initializing. For offline mode, use `tts_provider="pyttsx3"`; for silent text-only output, use `tts_provider="none"`.
 
 ```python
 assistant = VoiceAssistant(
     openai_api_key="your-key",
     elevenlabs_api_key="your-key",
+    tts_provider="elevenlabs",
     elevenlabs_voice_id="different-voice-id",  # Change voice
     silence_threshold=300,  # More sensitive
     silence_duration=2.0,   # Wait longer
@@ -303,17 +359,26 @@ assistant = VoiceAssistant(
 2. **TTS Not Working**
    - Verify API keys are set correctly
    - Check API quotas
+   - Use `--tts-provider pyttsx3` for fully local TTS
    - System will fall back to pyttsx3 if ElevenLabs fails
 
 3. **MCP Server Connection Issues**
    - Ensure Node.js is installed
-   - Check internet connection for npx downloads
+   - Check internet connection for first-time npx downloads
+   - Use `--mcp-config mcp_servers.offline.json` for local-only MCP servers
    - Verify API keys for specific servers
 
 4. **High Latency**
    - Use faster LLM model (e.g., `gpt-3.5-turbo`)
    - Reduce `max_steps` in MCPAgent
    - Consider using local models
+
+5. **Offline Mode Still Tries to Connect**
+   - Confirm the command includes `--llm-provider ollama`
+   - Confirm the command includes `--stt-provider local-whisper`
+   - Confirm the command includes `--tts-provider pyttsx3` or `--tts-provider none`
+   - Confirm the command includes `--mcp-config mcp_servers.offline.json`
+   - Ensure the Ollama model, faster-whisper model, and MCP npm packages were cached before disconnecting
 
 ## Contributing
 

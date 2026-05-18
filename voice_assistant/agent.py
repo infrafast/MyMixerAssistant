@@ -2,9 +2,9 @@
 Voice-First AI Personal Assistant with MCP Integration (Improved Version)
 
 This example demonstrates a voice-enabled personal assistant that uses:
-- Speech-to-text for voice input (OpenAI Whisper)
+- Speech-to-text for voice input (OpenAI Whisper API or local Whisper)
 - MCPAgent with multiple MCP servers (Linear, filesystem)
-- Text-to-speech for voice output (ElevenLabs speak or system TTS)
+- Text-to-speech for voice output (ElevenLabs speak, system TTS, or none)
 
 This version includes better error handling and fallback options.
 """
@@ -30,7 +30,7 @@ from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
 
 TTS_ENGINE = pyttsx3.init()
-DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"        #"1EmYoP3UnnnwhlJKovEy"=french male        #ZF6FPAbjXT4488VcRRnw=english female
+DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"  # french male; ZF6FPAbjXT4488VcRRnw = english female
 
 
 class VoiceAssistant:
@@ -38,11 +38,15 @@ class VoiceAssistant:
 
     def __init__(
         self,
-        openai_api_key: str,
+        openai_api_key: str | None = None,
         elevenlabs_api_key: str | None = None,
         model: str = "gpt-4o-mini",
         llm_provider: str = "openai",
         ollama_base_url: str = "http://localhost:11434",
+        stt_provider: str = "openai-whisper",
+        local_whisper_model: str = "base",
+        stt_language: str | None = "en",
+        tts_provider: str = "elevenlabs",
         elevenlabs_voice_id: str = DEFAULT_ELEVENLABS_VOICE_ID,
         silence_threshold: int = 500,
         silence_duration: float = 1.5,
@@ -53,11 +57,15 @@ class VoiceAssistant:
         """Initialize the voice assistant.
 
         Args:
-            openai_api_key: OpenAI API key for Whisper and GPT models
+            openai_api_key: OpenAI API key for Whisper API and GPT models
             elevenlabs_api_key: Optional ElevenLabs API key for TTS
             model: LLM model name to use (default: gpt-4o-mini)
             llm_provider: LLM provider (openai or ollama)
             ollama_base_url: Base URL for local Ollama server
+            stt_provider: Speech-to-text provider (openai-whisper or local-whisper)
+            local_whisper_model: Local faster-whisper model size or path
+            stt_language: Transcription language code, or None for auto-detect
+            tts_provider: Text-to-speech provider (elevenlabs, pyttsx3, or none)
             elevenlabs_voice_id: ElevenLabs voice ID (default: Rachel)
             silence_threshold: Audio silence detection threshold
             silence_duration: How long to wait after speech stops
@@ -77,16 +85,25 @@ class VoiceAssistant:
         self.audio = pyaudio.PyAudio()
         pygame.mixer.init()
 
-        # OpenAI client for speech-to-text
-        self.openai_client = openai.OpenAI(api_key=openai_api_key)
+        # Speech-to-text configuration
+        self.openai_api_key = openai_api_key
+        self.stt_provider = stt_provider.lower()
+        self.local_whisper_model_name = local_whisper_model
+        self.stt_language = stt_language or None
+        self.openai_client = None
+        self.local_whisper_model = None
+        if self.stt_provider == "openai-whisper":
+            self.openai_client = openai.OpenAI(api_key=openai_api_key)
+
         self.model = model
         self.llm_provider = llm_provider.lower()
         self.ollama_base_url = ollama_base_url
 
         # ElevenLabs client for text-to-speech
+        self.tts_provider = tts_provider.lower()
         self.elevenlabs_client = None
         self.elevenlabs_voice_id = elevenlabs_voice_id
-        if elevenlabs_api_key:
+        if self.tts_provider == "elevenlabs" and elevenlabs_api_key:
             self.elevenlabs_client = ElevenLabs(api_key=elevenlabs_api_key)
 
         # MCP configuration
@@ -126,23 +143,19 @@ class VoiceAssistant:
 
         return config
 
-
     def _build_llm(self):
-        """Build the configured LLM, with OpenAI fallback when Ollama fails."""
+        """Build the configured LLM."""
         if self.llm_provider == "ollama":
-            try:
-                print(f"Using Ollama model: {self.model} ({self.ollama_base_url})")
-                return ChatOllama(model=self.model, base_url=self.ollama_base_url)
-            except Exception as e:
-                print(f"Failed to initialize Ollama LLM: {e}")
-                print("Falling back to OpenAI LLM...")
+            print(f"Using Ollama model: {self.model} ({self.ollama_base_url})")
+            return ChatOllama(model=self.model, base_url=self.ollama_base_url)
 
         print(f"Using OpenAI model: {self.model}")
-        return ChatOpenAI(model=self.model)
+        return ChatOpenAI(model=self.model, api_key=self.openai_api_key)
 
     async def initialize_mcp(self):
         """Initialize MCP client and agent with proper error handling."""
         print("Initializing MCP servers...")
+        config = {"mcpServers": {}}
 
         # Use provided config or load from file
         if self.mcp_config:
@@ -153,8 +166,9 @@ class VoiceAssistant:
             if os.path.exists(config_file):
                 with open(config_file) as f:
                     config = json.load(f)
-                # Replace environment variable placeholders
-                config = self._substitute_env_vars(config)
+
+        # Replace environment variable placeholders
+        config = self._substitute_env_vars(config)
 
         try:
             # Create MCP client
@@ -232,22 +246,51 @@ class VoiceAssistant:
             print(f"Error recording audio: {e}")
             return None
 
-    def audio_to_text(self, audio_data: bytes) -> str | None:
-        """Convert audio to text using OpenAI Whisper."""
-        try:
-            # Create WAV file in memory
-            wav_buffer = io.BytesIO()
-            with wave.open(wav_buffer, "wb") as wf:
-                wf.setnchannels(self.channels)
-                wf.setsampwidth(self.audio.get_sample_size(self.audio_format))
-                wf.setframerate(self.rate)
-                wf.writeframes(audio_data)
+    def _write_wav(self, audio_data: bytes, audio_file) -> None:
+        """Write recorded audio bytes as a WAV file-like object."""
+        with wave.open(audio_file, "wb") as wf:
+            wf.setnchannels(self.channels)
+            wf.setsampwidth(self.audio.get_sample_size(self.audio_format))
+            wf.setframerate(self.rate)
+            wf.writeframes(audio_data)
 
+    def _load_local_whisper_model(self):
+        """Lazy-load faster-whisper so online-only users do not pay the import cost."""
+        if self.local_whisper_model:
+            return self.local_whisper_model
+
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError:
+            print("Local Whisper requires faster-whisper. Install it with: uv pip install -e .")
+            return None
+
+        print(f"Loading local Whisper model: {self.local_whisper_model_name}")
+        self.local_whisper_model = WhisperModel(self.local_whisper_model_name, device="auto", compute_type="int8")
+        return self.local_whisper_model
+
+    def audio_to_text(self, audio_data: bytes) -> str | None:
+        """Convert audio to text using the configured speech-to-text provider."""
+        if self.stt_provider == "local-whisper":
+            return self.audio_to_text_local_whisper(audio_data)
+        return self.audio_to_text_openai_whisper(audio_data)
+
+    def audio_to_text_openai_whisper(self, audio_data: bytes) -> str | None:
+        """Convert audio to text using OpenAI Whisper API."""
+        if not self.openai_client:
+            print("OpenAI Whisper is selected, but no OpenAI client is configured.")
+            return None
+
+        try:
+            wav_buffer = io.BytesIO()
+            self._write_wav(audio_data, wav_buffer)
             wav_buffer.seek(0)
             wav_buffer.name = "audio.wav"
 
-            # Transcribe using Whisper
-            response = self.openai_client.audio.transcriptions.create(model="whisper-1", file=wav_buffer, language="en")
+            kwargs = {"model": "whisper-1", "file": wav_buffer}
+            if self.stt_language:
+                kwargs["language"] = self.stt_language
+            response = self.openai_client.audio.transcriptions.create(**kwargs)
 
             return response.text.strip()
 
@@ -255,8 +298,41 @@ class VoiceAssistant:
             print(f"Error transcribing audio: {e}")
             return None
 
+    def audio_to_text_local_whisper(self, audio_data: bytes) -> str | None:
+        """Convert audio to text using faster-whisper locally."""
+        model = self._load_local_whisper_model()
+        if not model:
+            return None
+
+        wav_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as wav_file:
+                wav_path = wav_file.name
+                self._write_wav(audio_data, wav_file)
+
+            segments, _info = model.transcribe(wav_path, language=self.stt_language)
+            text = "".join(segment.text for segment in segments).strip()
+            return text or None
+
+        except Exception as e:
+            print(f"Error transcribing audio locally: {e}")
+            return None
+
+        finally:
+            if wav_path and os.path.exists(wav_path):
+                try:
+                    os.unlink(wav_path)
+                except OSError:
+                    pass
+
     async def text_to_speech(self, text: str) -> bool:
-        """Convert text to speech using ElevenLabs with pyttsx3 fallback."""
+        """Convert text to speech using the configured provider."""
+        if self.tts_provider == "none":
+            return False
+
+        if self.tts_provider == "pyttsx3":
+            return self.text_to_speech_pyttsx3(text)
+
         # Try ElevenLabs first
         if self.elevenlabs_client:
             try:
@@ -276,17 +352,20 @@ class VoiceAssistant:
             except Exception as e:
                 print(f"ElevenLabs TTS failed: {e}")
                 print("Falling back to local pyttsx3 TTS...")
+        elif self.tts_provider == "elevenlabs":
+            print("ElevenLabs TTS selected but ELEVENLABS_API_KEY is missing. Falling back to pyttsx3...")
 
-        # Local fallback when ElevenLabs is unavailable or fails
+        return self.text_to_speech_pyttsx3(text)
+
+    def text_to_speech_pyttsx3(self, text: str) -> bool:
+        """Speak text through the local system TTS engine."""
         try:
             TTS_ENGINE.say(text)
             TTS_ENGINE.runAndWait()
             return True
         except Exception as e:
             print(f"Local pyttsx3 TTS failed: {e}")
-
-        # Final fallback: just print
-        return False
+            return False
 
     async def process_command(self, text: str) -> str:
         """Process user command with MCP agent."""
@@ -388,6 +467,28 @@ async def main():
         help="Base URL for Ollama server",
     )
     parser.add_argument(
+        "--stt-provider",
+        default=os.getenv("STT_PROVIDER", "openai-whisper"),
+        choices=["openai-whisper", "local-whisper"],
+        help="Speech-to-text provider",
+    )
+    parser.add_argument(
+        "--local-whisper-model",
+        default=os.getenv("LOCAL_WHISPER_MODEL", "base"),
+        help="faster-whisper model size or local model path",
+    )
+    parser.add_argument(
+        "--stt-language",
+        default=os.getenv("STT_LANGUAGE", "en"),
+        help="Speech language code for Whisper; use 'auto' to auto-detect",
+    )
+    parser.add_argument(
+        "--tts-provider",
+        default=os.getenv("TTS_PROVIDER", "elevenlabs"),
+        choices=["elevenlabs", "pyttsx3", "none"],
+        help="Text-to-speech provider",
+    )
+    parser.add_argument(
         "--voice-id", default=os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID), help="ElevenLabs voice ID"
     )
     parser.add_argument(
@@ -405,16 +506,29 @@ async def main():
     parser.add_argument(
         "--system-prompt", default=os.getenv("ASSISTANT_SYSTEM_PROMPT"), help="Custom system prompt for the assistant"
     )
+    parser.add_argument(
+        "--mcp-config",
+        default=os.getenv("MCP_CONFIG"),
+        help="Path to an MCP server JSON config file. Defaults to mcp_servers.json",
+    )
 
     args = parser.parse_args()
+    stt_language = None if args.stt_language.lower() == "auto" else args.stt_language
 
     print(f"Using ElevenLabs voice ID: {args.voice_id}")
     print(f"Using LLM provider: {args.llm_provider}")
+    print(f"Using STT provider: {args.stt_provider}")
+    print(f"Using TTS provider: {args.tts_provider}")
 
-    if not args.openai_api_key:
+    if (args.llm_provider == "openai" or args.stt_provider == "openai-whisper") and not args.openai_api_key:
         print("Error: OpenAI API key is required")
-        print("Set OPENAI_API_KEY environment variable or use --openai-api-key")
+        print("Set OPENAI_API_KEY, pass --openai-api-key, or use --llm-provider ollama --stt-provider local-whisper")
         sys.exit(1)
+
+    mcp_config = None
+    if args.mcp_config:
+        with open(args.mcp_config) as f:
+            mcp_config = json.load(f)
 
     assistant = VoiceAssistant(
         openai_api_key=args.openai_api_key,
@@ -422,9 +536,14 @@ async def main():
         model=args.model,
         llm_provider=args.llm_provider,
         ollama_base_url=args.ollama_base_url,
+        stt_provider=args.stt_provider,
+        local_whisper_model=args.local_whisper_model,
+        stt_language=stt_language,
+        tts_provider=args.tts_provider,
         elevenlabs_voice_id=args.voice_id,
         silence_threshold=args.silence_threshold,
         silence_duration=args.silence_duration,
+        mcp_config=mcp_config,
         system_prompt=args.system_prompt,
     )
     await assistant.run()

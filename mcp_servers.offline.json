@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["--offline", "-y", "@modelcontextprotocol/server-filesystem", "."],
+      "env": {}
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["--offline", "-y", "@modelcontextprotocol/server-memory"],
+      "env": {}
+    }
+  }
+}
