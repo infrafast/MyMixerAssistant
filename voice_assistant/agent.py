@@ -234,7 +234,7 @@ class VoiceAssistant:
             return None
 
     async def text_to_speech(self, text: str) -> bool:
-        """Convert text to speech using available methods."""
+        """Convert text to speech using ElevenLabs with pyttsx3 fallback."""
         # Try ElevenLabs first
         if self.elevenlabs_client:
             try:
@@ -253,6 +253,15 @@ class VoiceAssistant:
                 return True
             except Exception as e:
                 print(f"ElevenLabs TTS failed: {e}")
+                print("Falling back to local pyttsx3 TTS...")
+
+        # Local fallback when ElevenLabs is unavailable or fails
+        try:
+            TTS_ENGINE.say(text)
+            TTS_ENGINE.runAndWait()
+            return True
+        except Exception as e:
+            print(f"Local pyttsx3 TTS failed: {e}")
 
         # Final fallback: just print
         return False
