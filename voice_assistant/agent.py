@@ -29,7 +29,7 @@ from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
 
 TTS_ENGINE = pyttsx3.init()
-DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"
+DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"        #"1EmYoP3UnnnwhlJKovEy"=french male        #ZF6FPAbjXT4488VcRRnw=english female
 
 
 class VoiceAssistant:
