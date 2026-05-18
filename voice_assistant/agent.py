@@ -29,6 +29,7 @@ from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
 
 TTS_ENGINE = pyttsx3.init()
+DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"
 
 
 class VoiceAssistant:
@@ -39,8 +40,7 @@ class VoiceAssistant:
         openai_api_key: str,
         elevenlabs_api_key: str | None = None,
         model: str = "gpt-4o-mini",
-        #elevenlabs_voice_id: str = "ZF6FPAbjXT4488VcRRnw",
-        elevenlabs_voice_id: str = "1EmYoP3UnnnwhlJKovEy",
+        elevenlabs_voice_id: str = DEFAULT_ELEVENLABS_VOICE_ID,
         silence_threshold: int = 500,
         silence_duration: float = 1.5,
         mcp_config: dict | None = None,
@@ -356,7 +356,7 @@ async def main():
     parser.add_argument("--elevenlabs-api-key", default=os.getenv("ELEVENLABS_API_KEY"), help="ElevenLabs API key")
     parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), help="OpenAI model to use")
     parser.add_argument(
-        "--voice-id", default=os.getenv("ELEVENLABS_VOICE_ID", "ZF6FPAbjXT4488VcRRnw"), help="ElevenLabs voice ID"
+        "--voice-id", default=os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID), help="ElevenLabs voice ID"
     )
     parser.add_argument(
         "--silence-threshold",
@@ -375,6 +375,8 @@ async def main():
     )
 
     args = parser.parse_args()
+
+    print(f"Using ElevenLabs voice ID: {args.voice_id}")
 
     if not args.openai_api_key:
         print("Error: OpenAI API key is required")
