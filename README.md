@@ -240,7 +240,9 @@ assistant = VoiceAssistant(
 ```
 
 **Note**: Only models with tool calling capabilities can be used. Check your model provider's documentation for supported models.
-
+ 
+ for ollama:
+ https://docs.ollama.com/capabilities/tool-calling
 
 #### Using Ollama (Local LLM)
 
@@ -264,7 +266,15 @@ OPENAI_MODEL=qwen3:8b
 OLLAMA_BASE_URL=http://localhost:11434
 ```
 
+compatibles models for an imac 24Gb could be:
+- qwen3:8b (ou tag équivalent disponible dans ta lib Ollama) Bon compromis qualité/vitesse pour agent outillé.
+- llama3.1:8b Très stable, largement utilisé, bon fallback.
+- mistral-nemo:12b Plus lourd, mais souvent meilleur en raisonnement/instructions.
+- command-r-plus (si tu acceptes plus de latence/ressources) Très bon en usage “tools/RAG”, mais plus coûteux localement.
+
+
 If Ollama initialization fails, the app falls back to OpenAI automatically.
+
 
 ### Changing Voice Settings
 
