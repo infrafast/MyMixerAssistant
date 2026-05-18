@@ -256,6 +256,36 @@ python voice_assistant/agent.py --help
 **Note**: Command-line arguments take precedence over environment variables. `OPENAI_API_KEY` is not required when both `--llm-provider ollama` and `--stt-provider local-whisper` are used.
 
 
+Si tu lances simplement : python voice_assistant/agent.py
+
+les paramètres par défaut sont :
+
+--llm-provider openai
+--model gpt-4o-mini
+--ollama-base-url http://localhost:11434
+
+--stt-provider openai-whisper
+--local-whisper-model base
+--stt-language en
+
+--tts-provider elevenlabs
+--voice-id 1EmYoP3UnnnwhlJKovEy
+
+--silence-threshold 500
+--silence-duration 1.5
+
+--mcp-config non défini
+
+Donc, par défaut, il utilise :
+LLM : OpenAI avec gpt-4o-mini
+STT : Whisper via l’API OpenAI
+TTS : ElevenLabs si ELEVENLABS_API_KEY existe, sinon fallback pyttsx3
+MCP config : mcp_servers.json, donc actuellement playwright + linear
+Langue transcription : anglais (en)
+Voix ElevenLabs : 1EmYoP3UnnnwhlJKovEy
+Important : sans paramètres, OPENAI_API_KEY est obligatoire, parce que le LLM par défaut est OpenAI et le STT par défaut est aussi OpenAI Whisper.
+
+
 ### Changing Model Provider
 
 The voice assistant supports OpenAI and Ollama through LangChain. Any selected model must support tool calling.
