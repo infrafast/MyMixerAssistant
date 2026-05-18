@@ -45,7 +45,7 @@ class VoiceAssistant:
         ollama_base_url: str = "http://localhost:11434",
         stt_provider: str = "openai-whisper",
         local_whisper_model: str = "base",
-        stt_language: str | None = "en",
+        stt_language: str | None = None,
         tts_provider: str = "elevenlabs",
         elevenlabs_voice_id: str = DEFAULT_ELEVENLABS_VOICE_ID,
         silence_threshold: int = 500,
@@ -111,8 +111,9 @@ class VoiceAssistant:
         self.mcp_client = None
         self.agent = None
         self.system_prompt = system_prompt or (
-            "You are a helpful voice assistant with access to various tools. Your name is mcp-use."
-            "Be concise in your responses since they will be spoken aloud. Summarize your results."
+            "You are a helpful voice assistant with access to various tools. Your name is mcp-use. "
+            "Be concise in your responses since they will be spoken aloud. Summarize your results. "
+            "Reply in the same language as the user's latest request whenever possible. "
             "Behave like a great motivational speaker, and motivate me throughout the conversation."
         )
 
@@ -479,7 +480,7 @@ async def main():
     )
     parser.add_argument(
         "--stt-language",
-        default=os.getenv("STT_LANGUAGE", "en"),
+        default=os.getenv("STT_LANGUAGE", "auto"),
         help="Speech language code for Whisper; use 'auto' to auto-detect",
     )
     parser.add_argument(

@@ -154,7 +154,7 @@ OLLAMA_BASE_URL=http://localhost:11434
 # Speech-to-text settings
 STT_PROVIDER=openai-whisper                     # openai-whisper | local-whisper
 LOCAL_WHISPER_MODEL=base                        # faster-whisper model size or local model path
-STT_LANGUAGE=en                                 # en, fr, etc.; use auto for auto-detect
+STT_LANGUAGE=auto                               # auto-detect, or force en, fr, etc.
 
 # Text-to-speech settings
 TTS_PROVIDER=elevenlabs                         # elevenlabs | pyttsx3 | none
@@ -266,7 +266,7 @@ les paramètres par défaut sont :
 
 --stt-provider openai-whisper
 --local-whisper-model base
---stt-language en
+--stt-language auto
 
 --tts-provider elevenlabs
 --voice-id 1EmYoP3UnnnwhlJKovEy
@@ -281,7 +281,7 @@ LLM : OpenAI avec gpt-4o-mini
 STT : Whisper via l’API OpenAI
 TTS : ElevenLabs si ELEVENLABS_API_KEY existe, sinon fallback pyttsx3
 MCP config : mcp_servers.json, donc actuellement playwright + linear
-Langue transcription : anglais (en)
+Langue transcription : auto-detection
 Voix ElevenLabs : 1EmYoP3UnnnwhlJKovEy
 Important : sans paramètres, OPENAI_API_KEY est obligatoire, parce que le LLM par défaut est OpenAI et le STT par défaut est aussi OpenAI Whisper.
 
