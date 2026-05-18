@@ -25,10 +25,12 @@ import pyttsx3
 from elevenlabs import play
 from elevenlabs.client import ElevenLabs
 from elevenlabs.types.voice_settings import VoiceSettings
+from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
 
 TTS_ENGINE = pyttsx3.init()
+DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"
 
 
 class VoiceAssistant:
@@ -38,8 +40,10 @@ class VoiceAssistant:
         self,
         openai_api_key: str,
         elevenlabs_api_key: str | None = None,
-        model: str = "o4-mini",
-        elevenlabs_voice_id: str = "ZF6FPAbjXT4488VcRRnw",
+        model: str = "gpt-4o-mini",
+        llm_provider: str = "openai",
+        ollama_base_url: str = "http://localhost:11434",
+        elevenlabs_voice_id: str = DEFAULT_ELEVENLABS_VOICE_ID,
         silence_threshold: int = 500,
         silence_duration: float = 1.5,
         mcp_config: dict | None = None,
@@ -51,7 +55,9 @@ class VoiceAssistant:
         Args:
             openai_api_key: OpenAI API key for Whisper and GPT models
             elevenlabs_api_key: Optional ElevenLabs API key for TTS
-            model: OpenAI model to use (default: gpt-4)
+            model: LLM model name to use (default: gpt-4o-mini)
+            llm_provider: LLM provider (openai or ollama)
+            ollama_base_url: Base URL for local Ollama server
             elevenlabs_voice_id: ElevenLabs voice ID (default: Rachel)
             silence_threshold: Audio silence detection threshold
             silence_duration: How long to wait after speech stops
@@ -74,6 +80,8 @@ class VoiceAssistant:
         # OpenAI client for speech-to-text
         self.openai_client = openai.OpenAI(api_key=openai_api_key)
         self.model = model
+        self.llm_provider = llm_provider.lower()
+        self.ollama_base_url = ollama_base_url
 
         # ElevenLabs client for text-to-speech
         self.elevenlabs_client = None
@@ -106,6 +114,20 @@ class VoiceAssistant:
                 result[key] = self._substitute_env_vars(value)
             return result
 
+
+    def _build_llm(self):
+        """Build the configured LLM, with OpenAI fallback when Ollama fails."""
+        if self.llm_provider == "ollama":
+            try:
+                print(f"Using Ollama model: {self.model} ({self.ollama_base_url})")
+                return ChatOllama(model=self.model, base_url=self.ollama_base_url)
+            except Exception as e:
+                print(f"Failed to initialize Ollama LLM: {e}")
+                print("Falling back to OpenAI LLM...")
+
+        print(f"Using OpenAI model: {self.model}")
+        return ChatOpenAI(model=self.model)
+
     async def initialize_mcp(self):
         """Initialize MCP client and agent with proper error handling."""
         print("Initializing MCP servers...")
@@ -127,7 +149,7 @@ class VoiceAssistant:
             self.mcp_client = MCPClient.from_dict(config)
 
             # Create LLM
-            llm = ChatOpenAI(model=self.model)
+            llm = self._build_llm()
 
             # Create agent with memory
             self.agent = MCPAgent(
@@ -222,7 +244,7 @@ class VoiceAssistant:
             return None
 
     async def text_to_speech(self, text: str) -> bool:
-        """Convert text to speech using available methods."""
+        """Convert text to speech using ElevenLabs with pyttsx3 fallback."""
         # Try ElevenLabs first
         if self.elevenlabs_client:
             try:
@@ -241,6 +263,15 @@ class VoiceAssistant:
                 return True
             except Exception as e:
                 print(f"ElevenLabs TTS failed: {e}")
+                print("Falling back to local pyttsx3 TTS...")
+
+        # Local fallback when ElevenLabs is unavailable or fails
+        try:
+            TTS_ENGINE.say(text)
+            TTS_ENGINE.runAndWait()
+            return True
+        except Exception as e:
+            print(f"Local pyttsx3 TTS failed: {e}")
 
         # Final fallback: just print
         return False
@@ -266,7 +297,14 @@ class VoiceAssistant:
             response = await self.agent.run(text)
             return response
         except Exception as e:
-            return f"Sorry, I encountered an error: {str(e)}"
+            error_text = str(e)
+            if "context_length_exceeded" in error_text or "maximum context length" in error_text:
+                return (
+                    "I reached the model context limit because tool definitions are too large for the current model. "
+                    "Please switch to a larger-context model (for example gpt-4o-mini or gpt-4o), "
+                    "or reduce enabled MCP servers/tools."
+                )
+            return f"Sorry, I encountered an error: {error_text}"
 
     async def run(self):
         """Main loop for the voice assistant."""
@@ -325,9 +363,20 @@ async def main():
     parser = argparse.ArgumentParser(description="Voice-enabled AI assistant")
     parser.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"), help="OpenAI API key")
     parser.add_argument("--elevenlabs-api-key", default=os.getenv("ELEVENLABS_API_KEY"), help="ElevenLabs API key")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4"), help="OpenAI model to use")
+    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), help="LLM model to use")
     parser.add_argument(
-        "--voice-id", default=os.getenv("ELEVENLABS_VOICE_ID", "ZF6FPAbjXT4488VcRRnw"), help="ElevenLabs voice ID"
+        "--llm-provider",
+        default=os.getenv("LLM_PROVIDER", "openai"),
+        choices=["openai", "ollama"],
+        help="LLM provider to use",
+    )
+    parser.add_argument(
+        "--ollama-base-url",
+        default=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        help="Base URL for Ollama server",
+    )
+    parser.add_argument(
+        "--voice-id", default=os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID), help="ElevenLabs voice ID"
     )
     parser.add_argument(
         "--silence-threshold",
@@ -347,6 +396,9 @@ async def main():
 
     args = parser.parse_args()
 
+    print(f"Using ElevenLabs voice ID: {args.voice_id}")
+    print(f"Using LLM provider: {args.llm_provider}")
+
     if not args.openai_api_key:
         print("Error: OpenAI API key is required")
         print("Set OPENAI_API_KEY environment variable or use --openai-api-key")
@@ -356,6 +408,8 @@ async def main():
         openai_api_key=args.openai_api_key,
         elevenlabs_api_key=args.elevenlabs_api_key,
         model=args.model,
+        llm_provider=args.llm_provider,
+        ollama_base_url=args.ollama_base_url,
         elevenlabs_voice_id=args.voice_id,
         silence_threshold=args.silence_threshold,
         silence_duration=args.silence_duration,

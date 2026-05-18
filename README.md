@@ -114,12 +114,15 @@ ELEVENLABS_API_KEY=your-elevenlabs-api-key
 
 # Optional - Model Provider Settings
 # You can use any model provider that supports tool calling
-OPENAI_API_KEY=your-openai-api-key              # For OpenAI models
-ANTHROPIC_API_KEY=your-anthropic-api-key        # For Claude models
-GROQ_API_KEY=your-groq-api-key                  # For Groq models
+OPENAI_API_KEY=your-openai-api-key              # Required for Whisper STT
 
-# Model selection (defaults to gpt-4)
-OPENAI_MODEL=gpt-4                              # OpenAI: gpt-4, gpt-4-turbo, gpt-3.5-turbo
+# LLM provider selection
+LLM_PROVIDER=openai                             # openai | ollama
+OPENAI_MODEL=gpt-4o-mini                        # OpenAI: gpt-4o-mini, gpt-4o, gpt-4.1-mini
+
+# Ollama local settings (when LLM_PROVIDER=ollama)
+OLLAMA_BASE_URL=http://localhost:11434
+# OPENAI_MODEL=qwen3:8b                         # Example Ollama model tag
 # Or use other providers:
 # ANTHROPIC_MODEL=claude-3-5-sonnet-20240620   # Anthropic Claude
 # GROQ_MODEL=llama3-8b-8192                    # Groq LLama
@@ -179,7 +182,10 @@ uv run python voice_assistant/agent.py
 python voice_assistant/agent.py
 
 # Override specific settings via command line
-python voice_assistant/agent.py --model gpt-3.5-turbo --silence-threshold 300
+python voice_assistant/agent.py --model gpt-4o-mini --silence-threshold 300
+
+# Use Ollama local model (with OpenAI fallback if Ollama init fails)
+python voice_assistant/agent.py --llm-provider ollama --model qwen3:8b
 
 # Provide all settings via command line (no .env needed)
 python voice_assistant/agent.py \
@@ -234,6 +240,31 @@ assistant = VoiceAssistant(
 ```
 
 **Note**: Only models with tool calling capabilities can be used. Check your model provider's documentation for supported models.
+
+
+#### Using Ollama (Local LLM)
+
+1. Install Ollama and start it:
+```bash
+ollama serve
+```
+2. Pull a tool-capable local model:
+```bash
+ollama pull qwen3:8b
+```
+3. Run assistant with Ollama provider:
+```bash
+python voice_assistant/agent.py --llm-provider ollama --model qwen3:8b
+```
+
+You can also configure this via `.env`:
+```bash
+LLM_PROVIDER=ollama
+OPENAI_MODEL=qwen3:8b
+OLLAMA_BASE_URL=http://localhost:11434
+```
+
+If Ollama initialization fails, the app falls back to OpenAI automatically.
 
 ### Changing Voice Settings
 
