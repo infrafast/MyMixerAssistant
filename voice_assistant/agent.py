@@ -99,13 +99,25 @@ class VoiceAssistant:
             self.notes_dir = os.path.join(tempfile.gettempdir(), "voice_assistant_notes")
         os.makedirs(self.notes_dir, exist_ok=True)
 
-    def _substitute_env_vars(self, config: dict) -> dict:
+    def _substitute_env_vars(self, config):
         """Recursively substitute environment variable placeholders in config."""
         if isinstance(config, dict):
             result = {}
             for key, value in config.items():
                 result[key] = self._substitute_env_vars(value)
             return result
+
+        if isinstance(config, list):
+            return [self._substitute_env_vars(item) for item in config]
+
+        if isinstance(config, str):
+            # Remplace uniquement les strings du type ${VAR_NAME}
+            if config.startswith("${") and config.endswith("}"):
+                var_name = config[2:-1]
+                return os.getenv(var_name, "")
+            return config
+
+        return config
 
     async def initialize_mcp(self):
         """Initialize MCP client and agent with proper error handling."""
