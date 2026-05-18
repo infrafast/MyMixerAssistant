@@ -118,8 +118,8 @@ OPENAI_API_KEY=your-openai-api-key              # For OpenAI models
 ANTHROPIC_API_KEY=your-anthropic-api-key        # For Claude models
 GROQ_API_KEY=your-groq-api-key                  # For Groq models
 
-# Model selection (defaults to gpt-4)
-OPENAI_MODEL=gpt-4                              # OpenAI: gpt-4, gpt-4-turbo, gpt-3.5-turbo
+# Model selection (defaults to gpt-4o-mini)
+OPENAI_MODEL=gpt-4o-mini                        # OpenAI: gpt-4o-mini, gpt-4o, gpt-4.1-mini
 # Or use other providers:
 # ANTHROPIC_MODEL=claude-3-5-sonnet-20240620   # Anthropic Claude
 # GROQ_MODEL=llama3-8b-8192                    # Groq LLama

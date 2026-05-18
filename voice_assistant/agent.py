@@ -38,7 +38,7 @@ class VoiceAssistant:
         self,
         openai_api_key: str,
         elevenlabs_api_key: str | None = None,
-        model: str = "o4-mini",
+        model: str = "gpt-4o-mini",
         elevenlabs_voice_id: str = "ZF6FPAbjXT4488VcRRnw",
         silence_threshold: int = 500,
         silence_duration: float = 1.5,
@@ -51,7 +51,7 @@ class VoiceAssistant:
         Args:
             openai_api_key: OpenAI API key for Whisper and GPT models
             elevenlabs_api_key: Optional ElevenLabs API key for TTS
-            model: OpenAI model to use (default: gpt-4)
+            model: OpenAI model to use (default: gpt-4o-mini)
             elevenlabs_voice_id: ElevenLabs voice ID (default: Rachel)
             silence_threshold: Audio silence detection threshold
             silence_duration: How long to wait after speech stops
@@ -287,7 +287,14 @@ class VoiceAssistant:
             response = await self.agent.run(text)
             return response
         except Exception as e:
-            return f"Sorry, I encountered an error: {str(e)}"
+            error_text = str(e)
+            if "context_length_exceeded" in error_text or "maximum context length" in error_text:
+                return (
+                    "I reached the model context limit because tool definitions are too large for the current model. "
+                    "Please switch to a larger-context model (for example gpt-4o-mini or gpt-4o), "
+                    "or reduce enabled MCP servers/tools."
+                )
+            return f"Sorry, I encountered an error: {error_text}"
 
     async def run(self):
         """Main loop for the voice assistant."""
@@ -346,7 +353,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Voice-enabled AI assistant")
     parser.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"), help="OpenAI API key")
     parser.add_argument("--elevenlabs-api-key", default=os.getenv("ELEVENLABS_API_KEY"), help="ElevenLabs API key")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4"), help="OpenAI model to use")
+    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), help="OpenAI model to use")
     parser.add_argument(
         "--voice-id", default=os.getenv("ELEVENLABS_VOICE_ID", "ZF6FPAbjXT4488VcRRnw"), help="ElevenLabs voice ID"
     )
