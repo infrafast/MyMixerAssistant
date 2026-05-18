@@ -30,7 +30,7 @@ from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
 
 TTS_ENGINE = pyttsx3.init()
-DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"
+DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"        #"1EmYoP3UnnnwhlJKovEy"=french male        #ZF6FPAbjXT4488VcRRnw=english female
 
 
 class VoiceAssistant:
@@ -106,7 +106,7 @@ class VoiceAssistant:
             self.notes_dir = os.path.join(tempfile.gettempdir(), "voice_assistant_notes")
         os.makedirs(self.notes_dir, exist_ok=True)
 
-    def _substitute_env_vars(self, config: dict) -> dict:
+    def _substitute_env_vars(self, config):
         """Recursively substitute environment variable placeholders in config."""
         if isinstance(config, dict):
             result = {}
