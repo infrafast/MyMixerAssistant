@@ -114,6 +114,18 @@ class VoiceAssistant:
                 result[key] = self._substitute_env_vars(value)
             return result
 
+        if isinstance(config, list):
+            return [self._substitute_env_vars(item) for item in config]
+
+        if isinstance(config, str):
+            # Support full-value env placeholders like "${API_KEY}"
+            if config.startswith("${") and config.endswith("}"):
+                env_key = config[2:-1]
+                return os.getenv(env_key, "")
+            return config
+
+        return config
+
 
     def _build_llm(self):
         """Build the configured LLM, with OpenAI fallback when Ollama fails."""
