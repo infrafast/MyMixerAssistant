@@ -23,8 +23,8 @@ import openai
 import pyaudio
 import pygame
 import pyttsx3
-from elevenlabs import play
 from elevenlabs.client import ElevenLabs
+from elevenlabs.play import play
 from elevenlabs.types.voice_settings import VoiceSettings
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
