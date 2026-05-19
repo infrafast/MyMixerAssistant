@@ -19,7 +19,6 @@ import socket
 import sys
 import tempfile
 import threading
-import time
 import wave
 
 import numpy as np
@@ -112,11 +111,18 @@ def speak_auto_network_status(text: str, env_file: Path, dotenv_values_func) -> 
 
 
 class AutoNetworkMonitor:
-    """Phase-1 auto monitor: announce internet status changes without switching runtime env."""
+    """Auto monitor: announce internet status changes and request runtime reloads."""
 
-    def __init__(self, initial_online: bool, dotenv_values_func, interval: float = AUTO_CHECK_INTERVAL):
+    def __init__(
+        self,
+        initial_online: bool,
+        dotenv_values_func,
+        reload_event: threading.Event | None = None,
+        interval: float = AUTO_CHECK_INTERVAL,
+    ):
         self.current_online = initial_online
         self.dotenv_values_func = dotenv_values_func
+        self.reload_event = reload_event
         self.interval = interval
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -141,12 +147,18 @@ class AutoNetworkMonitor:
 
             self.current_online = online
             self._announce(online)
+            if self.reload_event:
+                self.reload_event.set()
 
     def _announce(self, online: bool) -> None:
-        status_text = "Internet live" if online else "Internet inactive"
+        status_text = "Internet est en ligne" if online else "Connexion internet coupée"
         detected_env = AUTO_ENV_ONLINE if online else AUTO_ENV_OFFLINE
         print(f"Auto network status changed: {status_text}. Detected profile: {detected_env}")
         speak_auto_network_status(status_text, detected_env, self.dotenv_values_func)
+
+    @property
+    def detected_env_file(self) -> Path:
+        return AUTO_ENV_ONLINE if self.current_online else AUTO_ENV_OFFLINE
 
 
 class VoiceAssistant:
@@ -176,6 +188,7 @@ class VoiceAssistant:
         mcp_prompt_merge_mode: str = "append",
         notes_dir: str | None = None,
         system_prompt: str | None = None,
+        reload_event: threading.Event | None = None,
     ):
         """Initialize the voice assistant.
 
@@ -202,6 +215,7 @@ class VoiceAssistant:
             mcp_prompt_merge_mode: How to merge remote instructions: append or replace
             notes_dir: Directory for storing notes (default: temp dir)
             system_prompt: Optional custom system prompt for the assistant
+            reload_event: Optional event used by auto mode to interrupt and reload the assistant
         """
         # Audio configuration
         self.audio_format = pyaudio.paInt16
@@ -247,6 +261,7 @@ class VoiceAssistant:
         self.mcp_prompt_merge_mode = (mcp_prompt_merge_mode or "append").lower()
         self.mcp_client = None
         self.agent = None
+        self.reload_event = reload_event
         
         #self.system_prompt = system_prompt or (
         #    "You are a helpful voice assistant with access to various tools. Your name is mcp-use "
@@ -269,6 +284,8 @@ class VoiceAssistant:
         else:
             self.notes_dir = os.path.join(tempfile.gettempdir(), "voice_assistant_notes")
         os.makedirs(self.notes_dir, exist_ok=True)
+
+        self._log_configured_mcp_prompt_sources()
 
     def _substitute_env_vars(self, config):
         """Recursively substitute environment variable placeholders in config."""
@@ -366,6 +383,51 @@ class VoiceAssistant:
                 return value.strip()
         return None
 
+    def _log_configured_mcp_prompt_sources(self) -> None:
+        if not self.mcp_config:
+            return
+
+        sources = self._build_mcp_prompt_sources(self.mcp_config)
+        if not sources:
+            return
+
+        if self.mcp_load_server_prompt:
+            self._log_mcp_prompt_info(
+                "MCP startup prompt loading is enabled; configured source(s): "
+                f"{self._describe_mcp_prompt_sources(sources)}"
+            )
+            return
+
+        self._log_mcp_prompt_warning(
+            "MCP startup prompt loading is disabled; configured source(s) will not be loaded: "
+            f"{self._describe_mcp_prompt_sources(sources)}"
+        )
+
+    def _describe_mcp_prompt_source(self, source: dict) -> str:
+        server_name = self._source_value(source, "server", "server_name") or "unspecified"
+        prompt_name = self._source_value(source, "promptName", "prompt_name", "prompt", "name")
+        resource_uri = self._source_value(source, "resourceUri", "resource_uri", "resource")
+        tool_name = self._source_value(source, "tool", "toolName", "tool_name")
+        parts = [f"server='{server_name}'"]
+        if prompt_name:
+            parts.append(f"prompt='{prompt_name}'")
+        if resource_uri:
+            parts.append(f"resource='{resource_uri}'")
+        if tool_name:
+            parts.append(f"tool='{tool_name}'")
+        return " ".join(parts)
+
+    def _describe_mcp_prompt_sources(self, sources: list[dict]) -> str:
+        return "; ".join(self._describe_mcp_prompt_source(source) for source in sources)
+
+    def _log_mcp_prompt_info(self, message: str) -> None:
+        print(message)
+        LOGGER.info(message)
+
+    def _log_mcp_prompt_warning(self, message: str) -> None:
+        print(f"⚠️ Warning: {message}")
+        LOGGER.warning(message)
+
     def _format_loaded_mcp_prompts(self, loaded_prompts: list[dict]) -> str:
         sections = []
         for item in loaded_prompts:
@@ -388,9 +450,8 @@ class VoiceAssistant:
             return remote_prompt
 
         if self.mcp_prompt_merge_mode != "append":
-            LOGGER.warning(
-                "Unsupported MCP_PROMPT_MERGE_MODE '%s'; using append mode.",
-                self.mcp_prompt_merge_mode,
+            self._log_mcp_prompt_warning(
+                f"Unsupported MCP_PROMPT_MERGE_MODE '{self.mcp_prompt_merge_mode}'; using append mode."
             )
 
         return (
@@ -401,16 +462,16 @@ class VoiceAssistant:
 
     async def _get_mcp_prompt_text(self, session, prompt_name: str, server_name: str) -> str | None:
         if not hasattr(session, "get_prompt"):
-            LOGGER.warning("MCP server '%s' cannot fetch prompts with this mcp-use session.", server_name)
+            self._log_mcp_prompt_warning(f"MCP server '{server_name}' cannot fetch prompts with this mcp-use session.")
             return None
         if self._mcp_capability_enabled(session, "prompts") is False:
-            LOGGER.warning("MCP server '%s' does not advertise prompt support.", server_name)
+            self._log_mcp_prompt_warning(f"MCP server '{server_name}' does not advertise prompt support.")
             return None
 
         try:
             prompts = await session.list_prompts() if hasattr(session, "list_prompts") else []
             if prompts and prompt_name not in {getattr(prompt, "name", None) for prompt in prompts}:
-                LOGGER.warning("MCP prompt '%s' was not found on server '%s'.", prompt_name, server_name)
+                self._log_mcp_prompt_warning(f"MCP prompt '{prompt_name}' was not found on server '{server_name}'.")
                 return None
 
             result = await session.get_prompt(prompt_name)
@@ -418,46 +479,58 @@ class VoiceAssistant:
                 getattr(message, "content", None) for message in getattr(result, "messages", [])
             )
         except Exception as e:
-            LOGGER.warning("Failed to load MCP prompt '%s' from server '%s': %s", prompt_name, server_name, e)
+            self._log_mcp_prompt_warning(
+                f"Failed to load MCP prompt '{prompt_name}' from server '{server_name}': {e}"
+            )
             return None
 
     async def _get_mcp_resource_text(self, session, resource_uri: str, server_name: str) -> str | None:
         if not hasattr(session, "read_resource"):
-            LOGGER.warning("MCP server '%s' cannot read resources with this mcp-use session.", server_name)
+            self._log_mcp_prompt_warning(f"MCP server '{server_name}' cannot read resources with this mcp-use session.")
             return None
         if self._mcp_capability_enabled(session, "resources") is False:
-            LOGGER.warning("MCP server '%s' does not advertise resource support.", server_name)
+            self._log_mcp_prompt_warning(f"MCP server '{server_name}' does not advertise resource support.")
             return None
 
         try:
             resources = await session.list_resources() if hasattr(session, "list_resources") else []
             if resources and resource_uri not in {str(getattr(resource, "uri", "")) for resource in resources}:
-                LOGGER.warning("MCP resource '%s' was not found on server '%s'.", resource_uri, server_name)
+                self._log_mcp_prompt_warning(
+                    f"MCP resource '{resource_uri}' was not found on server '{server_name}'."
+                )
                 return None
 
             result = await session.read_resource(AnyUrl(resource_uri))
             return self._join_mcp_texts(getattr(result, "contents", []))
         except Exception as e:
-            LOGGER.warning("Failed to read MCP resource '%s' from server '%s': %s", resource_uri, server_name, e)
+            self._log_mcp_prompt_warning(
+                f"Failed to read MCP resource '{resource_uri}' from server '{server_name}': {e}"
+            )
             return None
 
     async def _get_mcp_tool_prompt_text(self, session, tool_name: str, server_name: str) -> str | None:
         if not hasattr(session, "call_tool"):
-            LOGGER.warning("MCP server '%s' cannot call tools with this mcp-use session.", server_name)
+            self._log_mcp_prompt_warning(f"MCP server '{server_name}' cannot call tools with this mcp-use session.")
             return None
         if self._mcp_capability_enabled(session, "tools") is False:
-            LOGGER.warning("MCP server '%s' does not advertise tool support for fallback prompt loading.", server_name)
+            self._log_mcp_prompt_warning(
+                f"MCP server '{server_name}' does not advertise tool support for fallback prompt loading."
+            )
             return None
 
         try:
             tools = await session.list_tools() if hasattr(session, "list_tools") else []
             if tools and tool_name not in {getattr(tool, "name", None) for tool in tools}:
-                LOGGER.warning("MCP prompt fallback tool '%s' was not found on server '%s'.", tool_name, server_name)
+                self._log_mcp_prompt_warning(
+                    f"MCP prompt fallback tool '{tool_name}' was not found on server '{server_name}'."
+                )
                 return None
 
             result = await session.call_tool(tool_name, {})
             if getattr(result, "isError", False):
-                LOGGER.warning("MCP prompt fallback tool '%s' returned an error on server '%s'.", tool_name, server_name)
+                self._log_mcp_prompt_warning(
+                    f"MCP prompt fallback tool '{tool_name}' returned an error on server '{server_name}'."
+                )
                 return None
 
             text = self._join_mcp_texts(getattr(result, "content", []))
@@ -471,11 +544,8 @@ class VoiceAssistant:
                     if isinstance(value, str) and value.strip():
                         return value.strip()
         except Exception as e:
-            LOGGER.warning(
-                "Failed to call MCP prompt fallback tool '%s' on server '%s': %s",
-                tool_name,
-                server_name,
-                e,
+            self._log_mcp_prompt_warning(
+                f"Failed to call MCP prompt fallback tool '{tool_name}' on server '{server_name}': {e}"
             )
             return None
 
@@ -488,17 +558,19 @@ class VoiceAssistant:
         tool_name = self._source_value(source, "tool", "toolName", "tool_name")
 
         if not server_name:
-            LOGGER.warning("Skipping MCP prompt source without a server name.")
+            self._log_mcp_prompt_warning("Skipping MCP prompt source without a server name.")
             return None
 
         if server_name not in config.get("mcpServers", {}):
-            LOGGER.warning("MCP prompt server '%s' is not configured; skipping this prompt source.", server_name)
+            self._log_mcp_prompt_warning(
+                f"MCP prompt server '{server_name}' is not configured; skipping this prompt source."
+            )
             return None
 
         if not any([prompt_name, resource_uri, tool_name]):
-            LOGGER.warning(
-                "MCP prompt source for server '%s' has no prompt name, resource URI, or fallback tool configured.",
-                server_name,
+            self._log_mcp_prompt_warning(
+                f"MCP prompt source for server '{server_name}' has no prompt name, resource URI, "
+                "or fallback tool configured."
             )
             return None
 
@@ -508,11 +580,11 @@ class VoiceAssistant:
             try:
                 session = await self.mcp_client.create_session(server_name)
             except Exception as e:
-                LOGGER.warning("Failed to create MCP session for prompt server '%s': %s", server_name, e)
+                self._log_mcp_prompt_warning(f"Failed to create MCP session for prompt server '{server_name}': {e}")
                 return None
 
         if session is None:
-            LOGGER.warning("MCP prompt server '%s' did not provide a usable session.", server_name)
+            self._log_mcp_prompt_warning(f"MCP prompt server '{server_name}' did not provide a usable session.")
             return None
 
         remote_prompt = None
@@ -534,7 +606,7 @@ class VoiceAssistant:
             source_id = tool_name
 
         if not remote_prompt:
-            LOGGER.warning("No MCP server instructions were loaded from server '%s'.", server_name)
+            self._log_mcp_prompt_warning(f"No MCP server instructions were loaded from server '{server_name}'.")
             return None
 
         return {
@@ -545,13 +617,18 @@ class VoiceAssistant:
         }
 
     async def _load_mcp_server_prompt(self, config: dict) -> str | None:
+        sources = self._build_mcp_prompt_sources(config)
         if not self.mcp_load_server_prompt:
             return None
 
-        sources = self._build_mcp_prompt_sources(config)
         if not sources:
-            LOGGER.warning("MCP_LOAD_SERVER_PROMPT is true but no MCP prompt sources are configured.")
+            self._log_mcp_prompt_warning("MCP_LOAD_SERVER_PROMPT is true but no MCP prompt sources are configured.")
             return None
+
+        self._log_mcp_prompt_info(
+            "MCP startup prompt loading enabled. Requested source(s): "
+            f"{self._describe_mcp_prompt_sources(sources)}"
+        )
 
         loaded_prompts = []
         for source in sources:
@@ -560,7 +637,7 @@ class VoiceAssistant:
                 loaded_prompts.append(loaded_prompt)
 
         if not loaded_prompts:
-            LOGGER.warning("No MCP server instructions were loaded; keeping the local system prompt.")
+            self._log_mcp_prompt_warning("No MCP server instructions were loaded; keeping the local system prompt.")
             return None
 
         loaded_summary = self._describe_loaded_mcp_prompts(loaded_prompts)
@@ -568,8 +645,7 @@ class VoiceAssistant:
             f"Loaded and merged {len(loaded_prompts)} MCP prompt source(s) "
             f"with merge mode '{self.mcp_prompt_merge_mode}': {loaded_summary}"
         )
-        print(log_message)
-        LOGGER.info(log_message)
+        self._log_mcp_prompt_info(log_message)
 
         return self._merge_system_prompt(loaded_prompts)
 
@@ -650,6 +726,10 @@ class VoiceAssistant:
             has_speech = False
 
             while True:
+                if self.reload_event and self.reload_event.is_set():
+                    print("Auto environment reload requested while recording.")
+                    break
+
                 data = stream.read(self.chunk, exception_on_overflow=False)
                 frames.append(data)
 
@@ -666,6 +746,9 @@ class VoiceAssistant:
 
             stream.stop_stream()
             stream.close()
+
+            if self.reload_event and self.reload_event.is_set():
+                return None
 
             if not has_speech:
                 print("No speech detected.")
@@ -840,22 +923,48 @@ class VoiceAssistant:
         # Initialize MCP
         if not await self.initialize_mcp():
             print("Failed to initialize MCP. Exiting.")
-            return
+            return "exit"
 
         try:
             while True:
+                if self.reload_event and self.reload_event.is_set():
+                    print("Auto environment reload requested. Stopping current assistant.")
+                    return "reload"
+
                 # Record audio or get text input
                 audio_data = self.record_audio()
+                if self.reload_event and self.reload_event.is_set():
+                    print("Auto environment reload requested. Stopping current assistant.")
+                    return "reload"
                 if not audio_data:
                     continue
 
                 # Convert to text
                 text = self.audio_to_text(audio_data)
+                if self.reload_event and self.reload_event.is_set():
+                    print("Auto environment reload requested. Stopping current assistant.")
+                    return "reload"
                 if not text:
                     continue
 
                 # Process command
-                response = await self.process_command(text)
+                process_task = asyncio.create_task(self.process_command(text))
+                while not process_task.done():
+                    if self.reload_event and self.reload_event.is_set():
+                        print("Auto environment reload requested. Cancelling current command.")
+                        process_task.cancel()
+                        try:
+                            await process_task
+                        except asyncio.CancelledError:
+                            pass
+                        return "reload"
+                    await asyncio.sleep(0.1)
+
+                response = await process_task
+                if self.reload_event and self.reload_event.is_set():
+                    print("Auto environment reload requested. Discarding current response.")
+                    return "reload"
+
                 print(f"\nAssistant: {response}")
 
                 # Check for exit
@@ -867,12 +976,15 @@ class VoiceAssistant:
 
         except KeyboardInterrupt:
             print("\n\nInterrupted by user.")
+            return "exit"
         finally:
             # Cleanup
             self.audio.terminate()
             pygame.mixer.quit()
             if self.mcp_client and self.mcp_client.sessions:
                 await self.mcp_client.close_all_sessions()
+
+        return "exit"
 
 
 async def main():
@@ -927,6 +1039,100 @@ async def main():
 
         return secret or None
 
+    def clear_env_keys(env_files: list[Path]) -> None:
+        """Clear keys owned by env profiles so auto reloads do not keep stale values."""
+        env_keys = set()
+        for profile in env_files:
+            if profile.exists():
+                env_keys.update(dotenv_values(profile).keys())
+
+        for key in env_keys:
+            os.environ.pop(key, None)
+
+    def build_assistant_from_env(env_file: Path, reload_event: threading.Event | None = None) -> VoiceAssistant:
+        """Load one env profile and build a fresh assistant instance from it."""
+        clear_profiles = [env_file]
+        if auto_env_mode:
+            clear_profiles.extend([AUTO_ENV_ONLINE, AUTO_ENV_OFFLINE])
+        clear_env_keys(clear_profiles)
+        load_dotenv(env_file, override=True)
+
+        openai_api_key = env_secret("OPENAI_API_KEY")
+        elevenlabs_api_key = env_secret("ELEVENLABS_API_KEY")
+        model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+        llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+        ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        stt_provider = os.getenv("STT_PROVIDER", "openai-whisper").lower()
+        local_whisper_model = os.getenv("LOCAL_WHISPER_MODEL", "base")
+        stt_language_value = os.getenv("STT_LANGUAGE", "auto")
+        stt_language = None if stt_language_value.lower() == "auto" else stt_language_value
+        tts_provider = os.getenv("TTS_PROVIDER", "elevenlabs").lower()
+        voice_id = os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID)
+        silence_threshold = env_int("VOICE_SILENCE_THRESHOLD", 500)
+        silence_duration = env_float("VOICE_SILENCE_DURATION", 1.5)
+        system_prompt = env_optional("ASSISTANT_SYSTEM_PROMPT")
+        mcp_config_path = env_optional("MCP_CONFIG")
+        mcp_prompt_merge_mode = os.getenv("MCP_PROMPT_MERGE_MODE", "append").lower()
+
+        if llm_provider not in {"openai", "ollama"}:
+            print(f"Error: LLM_PROVIDER must be 'openai' or 'ollama', got: {llm_provider}")
+            sys.exit(1)
+        if stt_provider not in {"openai-whisper", "local-whisper"}:
+            print(f"Error: STT_PROVIDER must be 'openai-whisper' or 'local-whisper', got: {stt_provider}")
+            sys.exit(1)
+        if tts_provider not in {"elevenlabs", "pyttsx3", "none"}:
+            print(f"Error: TTS_PROVIDER must be 'elevenlabs', 'pyttsx3', or 'none', got: {tts_provider}")
+            sys.exit(1)
+        if mcp_prompt_merge_mode not in {"append", "replace"}:
+            print(f"Error: MCP_PROMPT_MERGE_MODE must be 'append' or 'replace', got: {mcp_prompt_merge_mode}")
+            sys.exit(1)
+
+        print(f"Using env file: {env_file}")
+        print(f"Using ElevenLabs voice ID: {voice_id}")
+        print(f"Using LLM provider: {llm_provider}")
+        print(f"Using STT provider: {stt_provider}")
+        print(f"Using TTS provider: {tts_provider}")
+
+        if (llm_provider == "openai" or stt_provider == "openai-whisper") and not openai_api_key:
+            print("Error: OpenAI API key is required")
+            print(
+                "Set OPENAI_API_KEY_FILE, or use an offline env file with "
+                "LLM_PROVIDER=ollama and STT_PROVIDER=local-whisper"
+            )
+            sys.exit(1)
+
+        mcp_config = None
+        if mcp_config_path:
+            try:
+                with open(mcp_config_path) as f:
+                    mcp_config = json.load(f)
+            except OSError as e:
+                print(f"Error: could not read MCP_CONFIG '{mcp_config_path}': {e}")
+                sys.exit(1)
+            except json.JSONDecodeError as e:
+                print(f"Error: invalid JSON in MCP_CONFIG '{mcp_config_path}': {e}")
+                sys.exit(1)
+
+        return VoiceAssistant(
+            openai_api_key=openai_api_key,
+            elevenlabs_api_key=elevenlabs_api_key,
+            model=model,
+            llm_provider=llm_provider,
+            ollama_base_url=ollama_base_url,
+            stt_provider=stt_provider,
+            local_whisper_model=local_whisper_model,
+            stt_language=stt_language,
+            tts_provider=tts_provider,
+            elevenlabs_voice_id=voice_id,
+            silence_threshold=silence_threshold,
+            silence_duration=silence_duration,
+            mcp_config=mcp_config,
+            mcp_load_server_prompt=env_bool("MCP_LOAD_SERVER_PROMPT", False),
+            mcp_prompt_merge_mode=mcp_prompt_merge_mode,
+            system_prompt=system_prompt,
+            reload_event=reload_event,
+        )
+
     parser = argparse.ArgumentParser(description="Voice-enabled AI assistant")
     parser.add_argument(
         "--env-file",
@@ -935,7 +1141,6 @@ async def main():
     )
     args = parser.parse_args()
 
-    auto_monitor = None
     auto_env_mode = args.env_file.strip().lower() == "auto"
     if auto_env_mode:
         internet_online = check_internet_connection()
@@ -955,87 +1160,44 @@ async def main():
         print("  python voice_assistant/agent.py --env-file auto")
         sys.exit(1)
 
-    load_dotenv(env_file, override=True)
+    if not auto_env_mode:
+        assistant = build_assistant_from_env(env_file)
+        await assistant.run()
+        return
 
-    openai_api_key = env_secret("OPENAI_API_KEY")
-    elevenlabs_api_key = env_secret("ELEVENLABS_API_KEY")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
-    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-    stt_provider = os.getenv("STT_PROVIDER", "openai-whisper").lower()
-    local_whisper_model = os.getenv("LOCAL_WHISPER_MODEL", "base")
-    stt_language_value = os.getenv("STT_LANGUAGE", "auto")
-    stt_language = None if stt_language_value.lower() == "auto" else stt_language_value
-    tts_provider = os.getenv("TTS_PROVIDER", "elevenlabs").lower()
-    voice_id = os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID)
-    silence_threshold = env_int("VOICE_SILENCE_THRESHOLD", 500)
-    silence_duration = env_float("VOICE_SILENCE_DURATION", 1.5)
-    system_prompt = env_optional("ASSISTANT_SYSTEM_PROMPT")
-    mcp_config_path = env_optional("MCP_CONFIG")
-    mcp_prompt_merge_mode = os.getenv("MCP_PROMPT_MERGE_MODE", "append").lower()
-
-    if llm_provider not in {"openai", "ollama"}:
-        print(f"Error: LLM_PROVIDER must be 'openai' or 'ollama', got: {llm_provider}")
-        sys.exit(1)
-    if stt_provider not in {"openai-whisper", "local-whisper"}:
-        print(f"Error: STT_PROVIDER must be 'openai-whisper' or 'local-whisper', got: {stt_provider}")
-        sys.exit(1)
-    if tts_provider not in {"elevenlabs", "pyttsx3", "none"}:
-        print(f"Error: TTS_PROVIDER must be 'elevenlabs', 'pyttsx3', or 'none', got: {tts_provider}")
-        sys.exit(1)
-    if mcp_prompt_merge_mode not in {"append", "replace"}:
-        print(f"Error: MCP_PROMPT_MERGE_MODE must be 'append' or 'replace', got: {mcp_prompt_merge_mode}")
-        sys.exit(1)
-
-    print(f"Using env file: {env_file}")
-    print(f"Using ElevenLabs voice ID: {voice_id}")
-    print(f"Using LLM provider: {llm_provider}")
-    print(f"Using STT provider: {stt_provider}")
-    print(f"Using TTS provider: {tts_provider}")
-
-    if (llm_provider == "openai" or stt_provider == "openai-whisper") and not openai_api_key:
-        print("Error: OpenAI API key is required")
-        print("Set OPENAI_API_KEY, or use an offline env file with LLM_PROVIDER=ollama and STT_PROVIDER=local-whisper")
-        sys.exit(1)
-
-    mcp_config = None
-    if mcp_config_path:
-        with open(mcp_config_path) as f:
-            mcp_config = json.load(f)
-
-    assistant = VoiceAssistant(
-        openai_api_key=openai_api_key,
-        elevenlabs_api_key=elevenlabs_api_key,
-        model=model,
-        llm_provider=llm_provider,
-        ollama_base_url=ollama_base_url,
-        stt_provider=stt_provider,
-        local_whisper_model=local_whisper_model,
-        stt_language=stt_language,
-        tts_provider=tts_provider,
-        elevenlabs_voice_id=voice_id,
-        silence_threshold=silence_threshold,
-        silence_duration=silence_duration,
-        mcp_config=mcp_config,
-        mcp_load_server_prompt=env_bool("MCP_LOAD_SERVER_PROMPT", False),
-        mcp_prompt_merge_mode=mcp_prompt_merge_mode,
-        system_prompt=system_prompt,
+    reload_event = threading.Event()
+    auto_monitor = AutoNetworkMonitor(
+        initial_online=internet_online,
+        dotenv_values_func=dotenv_values,
+        reload_event=reload_event,
+        interval=AUTO_CHECK_INTERVAL,
     )
-
-    if auto_env_mode:
-        auto_monitor = AutoNetworkMonitor(
-            initial_online=internet_online,
-            dotenv_values_func=dotenv_values,
-            interval=AUTO_CHECK_INTERVAL,
-        )
-        auto_monitor.announce_initial_status()
-        auto_monitor.start()
+    auto_monitor.announce_initial_status()
+    auto_monitor.start()
 
     try:
-        await assistant.run()
+        announce_reload_complete = False
+        while True:
+            env_file = auto_monitor.detected_env_file
+            if not env_file.exists():
+                print(f"Error: env file not found: {env_file}")
+                sys.exit(1)
+
+            reload_event.clear()
+            assistant = build_assistant_from_env(env_file, reload_event=reload_event)
+            if announce_reload_complete:
+                await assistant.text_to_speech("Environnement mis à jour. La demande en cours a été annulée.")
+                announce_reload_complete = False
+
+            run_result = await assistant.run()
+            if run_result != "reload":
+                break
+
+            next_env_file = auto_monitor.detected_env_file
+            print(f"Auto env reload requested. Restarting assistant with {next_env_file}.")
+            announce_reload_complete = True
     finally:
-        if auto_monitor:
-            auto_monitor.stop()
+        auto_monitor.stop()
 
 
 if __name__ == "__main__":

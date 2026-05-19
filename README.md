@@ -390,12 +390,12 @@ python voice_assistant/agent.py --help
 
 `OPENAI_API_KEY` is not required when the selected env file uses `LLM_PROVIDER=ollama` and `STT_PROVIDER=local-whisper`.
 
-With `--env-file auto`, the assistant checks internet connectivity at startup. It loads `.env.online` when internet is reachable, otherwise `.env.offline`. In the current phase-1 implementation, it also monitors connectivity every 10 seconds and announces status changes with the TTS configured by the newly detected profile:
+With `--env-file auto`, the assistant checks internet connectivity at startup. It loads `.env.online` when internet is reachable, otherwise `.env.offline`. It then monitors connectivity every 10 seconds and switches the running assistant profile when the connection state changes:
 
 - `Internet live` is announced with the TTS from `.env.online`
 - `Internet inactive` is announced with the TTS from `.env.offline`
 
-Phase 1 does not yet switch the running assistant environment after startup; it only selects the initial profile and announces later connectivity changes.
+After the announcement, the current voice loop is interrupted if needed, the active assistant instance is cleaned up, and a fresh instance is started from the newly detected env file. This reloads the TTS, STT, LLM, and MCP configuration from the selected profile. Any command currently being recorded or processed may be cancelled during the switch, which keeps the implementation simple and avoids mixing services from two profiles. Once the new assistant is ready, it announces that the environment was updated and the in-flight request was cancelled using the TTS from the new profile.
 
 
 Si tu lances simplement : python voice_assistant/agent.py
@@ -516,7 +516,7 @@ assistant = VoiceAssistant(
 
 1. introduce a "thinking" looping sound which is played between the user prompt and until the TTS reply to the user so he has a semantic feedback that his request is being processed
 2. add a web page to configure all the environement variables
-3. Continue the `--env-file auto` work. Phase 1 is implemented: startup chooses `.env.online` or `.env.offline`, then network monitoring announces `Internet live` or `Internet inactive` with the TTS configured by the newly detected profile. Phase 2 should switch the running environment after startup by safely restarting TTS/STT/LLM/MCP between interactions.
+3. Continue the `--env-file auto` work. Phase 1 and phase 2 are implemented: startup chooses `.env.online` or `.env.offline`, network monitoring announces `Internet live` or `Internet inactive` with the TTS configured by the newly detected profile, then the assistant restarts with the new profile so TTS/STT/LLM/MCP are rebuilt from the selected env file. Future improvements could add configurable connectivity endpoints, debounce settings, and a smoother handoff for long-running requests.
 4. 
 
 1. **No Audio Input Detected**
@@ -568,3 +568,4 @@ assistant = VoiceAssistant(
    - Auto mode checks a short TCP connection to `api.openai.com:443`
    - If that host is blocked by your network, auto mode may select `.env.offline`
    - If `.env.online` is selected, make sure `OPENAI_API_KEY.txt` and `ELEVENLABS_API_KEY.txt` exist when those services are configured
+   - When the connection status changes, auto mode cancels the current recording or request if needed, then restarts the assistant with `.env.online` or `.env.offline`
