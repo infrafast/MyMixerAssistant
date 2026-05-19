@@ -43,6 +43,7 @@ It is more specifically design for assisting live musician that gives commands t
 - 🤖 **AI-Powered**: Conversational AI with memory persistence
 - 🌐 **Multiple Model Providers**: Works with OpenAI or local Ollama models that support tool calling
 - 🛠️ **Multi-Tool Integration**: Seamlessly connects to any MCP servers:
+- 🧭 **MCP-provided Startup Instructions**: Optionally loads system instructions from MCP prompts, resources, or one configured fallback tool
 - 💾 **Conversational Memory**: Maintains context across interactions
 - 🎯 **Extensible**: Easy to add new MCP servers and capabilities
 - 📴 **Offline Mode**: Can run with Ollama, local Whisper, pyttsx3, and local MCP servers after models/packages are installed
@@ -171,6 +172,14 @@ VOICE_SILENCE_DURATION=1.5                      # Seconds to wait after speech
 ASSISTANT_SYSTEM_PROMPT="You are a helpful voice assistant..."  # Customize personality
 MCP_CONFIG=mcp_servers.offline.json             # Optional config override
 
+# Optional - MCP-provided Assistant Instructions
+MCP_LOAD_SERVER_PROMPT=false                    # true | false, default false
+MCP_PROMPT_SERVER=mixer                         # Logical server name from mcp_servers.json
+MCP_PROMPT_NAME=xmseries_mixer_assistant        # Optional MCP prompt name
+MCP_PROMPT_RESOURCE_URI=xmseries://prompt/system # Optional MCP resource URI
+MCP_PROMPT_TOOL=osc_get_agent_prompt            # Optional fallback tool name
+MCP_PROMPT_MERGE_MODE=append                    # append | replace, default append
+
 # Optional - MCP Server Specific
 LINEAR_API_KEY=your-linear-api-key              # For Linear integration
 ```
@@ -212,6 +221,73 @@ config = {
 }
 ```
 
+### MCP-provided Startup Instructions
+
+By default, the assistant uses only the local `ASSISTANT_SYSTEM_PROMPT` or the built-in prompt in `voice_assistant/agent.py`.
+
+You can optionally ask the assistant to load additional system instructions from one configured MCP server before `MCPAgent` is created. This is useful when a server wants to expose domain-specific behavior, tool usage rules, or operator guidance without hard-coding that content in the voice assistant.
+
+Enable it with:
+
+```bash
+MCP_LOAD_SERVER_PROMPT=true
+MCP_PROMPT_SERVER=mixer
+```
+
+`MCP_PROMPT_SERVER` must match the logical server name in your MCP config:
+
+```json
+{
+  "mcpServers": {
+    "mixer": {
+      "command": "node",
+      "args": ["path/to/server.js"]
+    }
+  }
+}
+```
+
+The assistant tries only the sources you configure, in this order:
+
+1. `MCP_PROMPT_NAME`: fetch an MCP prompt with `prompts/get`
+2. `MCP_PROMPT_RESOURCE_URI`: read an MCP resource with `resources/read`
+3. `MCP_PROMPT_TOOL`: call exactly this fallback tool with empty arguments
+
+It never calls arbitrary tools while loading startup instructions. If the server is missing, does not support prompts/resources, does not expose the configured fallback tool, or returns an error, the assistant logs a warning and continues with the local prompt.
+
+Example configuration:
+
+```bash
+MCP_LOAD_SERVER_PROMPT=true
+MCP_PROMPT_SERVER=mixer
+MCP_PROMPT_NAME=xmseries_mixer_assistant
+MCP_PROMPT_RESOURCE_URI=xmseries://prompt/system
+MCP_PROMPT_TOOL=osc_get_agent_prompt
+MCP_PROMPT_MERGE_MODE=append
+```
+
+With `MCP_PROMPT_MERGE_MODE=append`, the local prompt stays first and the remote instructions are appended under:
+
+```text
+Additional instructions loaded from MCP server "mixer":
+```
+
+This mode preserves the local voice constraints, including concise TTS-friendly replies, same-language answers, plain text only, and no emojis, markdown, bullets, or decorative characters.
+
+With `MCP_PROMPT_MERGE_MODE=replace`, only the remote instructions are used. Choose this only if the MCP server prompt already contains all voice and formatting constraints needed by the assistant.
+
+The same settings can be provided through CLI flags:
+
+```bash
+python voice_assistant/agent.py \
+  --mcp-load-server-prompt \
+  --mcp-prompt-server mixer \
+  --mcp-prompt-name xmseries_mixer_assistant \
+  --mcp-prompt-resource-uri xmseries://prompt/system \
+  --mcp-prompt-tool osc_get_agent_prompt \
+  --mcp-prompt-merge-mode append
+```
+
 
 ### Running the Assistant
 
@@ -250,6 +326,13 @@ python voice_assistant/agent.py \
   --silence-threshold 500 \
   --silence-duration 1.5
 
+# Load optional startup instructions from one configured MCP server
+python voice_assistant/agent.py \
+  --mcp-load-server-prompt \
+  --mcp-prompt-server mixer \
+  --mcp-prompt-name xmseries_mixer_assistant \
+  --mcp-prompt-merge-mode append
+
 # See all available options
 python voice_assistant/agent.py --help
 ```
@@ -276,12 +359,15 @@ les paramètres par défaut sont :
 --silence-duration 1.5
 
 --mcp-config non défini
+--mcp-load-server-prompt false
+--mcp-prompt-merge-mode append
 
 Donc, par défaut, il utilise :
 LLM : OpenAI avec gpt-4o-mini
 STT : Whisper via l’API OpenAI
 TTS : ElevenLabs si ELEVENLABS_API_KEY existe, sinon fallback pyttsx3
 MCP config : mcp_servers.json, donc actuellement playwright + linear
+Prompt MCP au démarrage : désactivé, donc seul le prompt local est utilisé
 Langue transcription : auto-detection
 Voix ElevenLabs : 1EmYoP3UnnnwhlJKovEy
 Important : sans paramètres, OPENAI_API_KEY est obligatoire, parce que le LLM par défaut est OpenAI et le STT par défaut est aussi OpenAI Whisper.
@@ -409,15 +495,21 @@ assistant = VoiceAssistant(
    - Use `--mcp-config mcp_servers.offline.json` for local-only MCP servers
    - Verify API keys for specific servers
 
-4. **High Latency**
+4. **MCP Startup Instructions Not Loaded**
+   - Confirm `MCP_LOAD_SERVER_PROMPT=true` or pass `--mcp-load-server-prompt`
+   - Confirm `MCP_PROMPT_SERVER` matches a key under `mcpServers`
+   - Configure at least one of `MCP_PROMPT_NAME`, `MCP_PROMPT_RESOURCE_URI`, or `MCP_PROMPT_TOOL`
+   - Check the startup warnings for unsupported prompts/resources or a missing fallback tool
+   - Use `MCP_PROMPT_MERGE_MODE=append` when you want to keep the local voice and TTS constraints
+
+5. **High Latency**
    - Use faster LLM model (e.g., `gpt-3.5-turbo`)
    - Reduce `max_steps` in MCPAgent
    - Consider using local models
 
-5. **Offline Mode Still Tries to Connect**
+6. **Offline Mode Still Tries to Connect**
    - Confirm the command includes `--llm-provider ollama`
    - Confirm the command includes `--stt-provider local-whisper`
    - Confirm the command includes `--tts-provider pyttsx3` or `--tts-provider none`
    - Confirm the command includes `--mcp-config mcp_servers.offline.json`
    - Ensure the Ollama model, faster-whisper model, and MCP npm packages were cached before disconnecting
-

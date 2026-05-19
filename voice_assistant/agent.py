@@ -12,6 +12,7 @@ This version includes better error handling and fallback options.
 import asyncio
 import io
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -28,9 +29,11 @@ from elevenlabs.types.voice_settings import VoiceSettings
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
+from pydantic import AnyUrl
 
 TTS_ENGINE = pyttsx3.init()
 DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"  # french male; ZF6FPAbjXT4488VcRRnw = english female
+LOGGER = logging.getLogger(__name__)
 
 
 class VoiceAssistant:
@@ -51,6 +54,12 @@ class VoiceAssistant:
         silence_threshold: int = 500,
         silence_duration: float = 1.5,
         mcp_config: dict | None = None,
+        mcp_load_server_prompt: bool = False,
+        mcp_prompt_server: str | None = None,
+        mcp_prompt_name: str | None = None,
+        mcp_prompt_resource_uri: str | None = None,
+        mcp_prompt_tool: str | None = None,
+        mcp_prompt_merge_mode: str = "append",
         notes_dir: str | None = None,
         system_prompt: str | None = None,
     ):
@@ -70,6 +79,12 @@ class VoiceAssistant:
             silence_threshold: Audio silence detection threshold
             silence_duration: How long to wait after speech stops
             mcp_config: Optional MCP server configuration dict
+            mcp_load_server_prompt: Whether to load extra system instructions from an MCP server
+            mcp_prompt_server: Logical MCP server name to query for instructions
+            mcp_prompt_name: Optional MCP prompt name to fetch
+            mcp_prompt_resource_uri: Optional MCP resource URI to read
+            mcp_prompt_tool: Optional fallback MCP tool name to call for prompt text
+            mcp_prompt_merge_mode: How to merge remote instructions: append or replace
             notes_dir: Directory for storing notes (default: temp dir)
             system_prompt: Optional custom system prompt for the assistant
         """
@@ -108,6 +123,12 @@ class VoiceAssistant:
 
         # MCP configuration
         self.mcp_config = mcp_config
+        self.mcp_load_server_prompt = mcp_load_server_prompt
+        self.mcp_prompt_server = mcp_prompt_server
+        self.mcp_prompt_name = mcp_prompt_name
+        self.mcp_prompt_resource_uri = mcp_prompt_resource_uri
+        self.mcp_prompt_tool = mcp_prompt_tool
+        self.mcp_prompt_merge_mode = (mcp_prompt_merge_mode or "append").lower()
         self.mcp_client = None
         self.agent = None
         
@@ -162,6 +183,196 @@ class VoiceAssistant:
         print(f"Using OpenAI model: {self.model}")
         return ChatOpenAI(model=self.model, api_key=self.openai_api_key)
 
+    def _text_from_mcp_content(self, content) -> str | None:
+        """Extract text from common MCP prompt/resource/tool content objects."""
+        if content is None:
+            return None
+
+        if isinstance(content, str):
+            return content
+
+        text = getattr(content, "text", None)
+        if isinstance(text, str):
+            return text
+
+        resource = getattr(content, "resource", None)
+        if resource is not None:
+            return self._text_from_mcp_content(resource)
+
+        return None
+
+    def _join_mcp_texts(self, values) -> str | None:
+        texts = []
+        for value in values or []:
+            text = self._text_from_mcp_content(value)
+            if text:
+                texts.append(text.strip())
+        joined = "\n\n".join(text for text in texts if text)
+        return joined or None
+
+    def _mcp_capability_enabled(self, session, capability_name: str) -> bool | None:
+        capabilities = getattr(getattr(session, "connector", None), "capabilities", None)
+        if capabilities is None:
+            return None
+        return bool(getattr(capabilities, capability_name, None))
+
+    def _merge_system_prompt(self, remote_prompt: str, server_name: str) -> str:
+        if self.mcp_prompt_merge_mode == "replace":
+            return remote_prompt
+
+        if self.mcp_prompt_merge_mode != "append":
+            LOGGER.warning(
+                "Unsupported MCP_PROMPT_MERGE_MODE '%s'; using append mode.",
+                self.mcp_prompt_merge_mode,
+            )
+
+        return (
+            f"{self.system_prompt.rstrip()}\n\n"
+            f'Additional instructions loaded from MCP server "{server_name}":\n'
+            f"{remote_prompt.strip()}"
+        )
+
+    async def _get_mcp_prompt_text(self, session, prompt_name: str, server_name: str) -> str | None:
+        if not hasattr(session, "get_prompt"):
+            LOGGER.warning("MCP server '%s' cannot fetch prompts with this mcp-use session.", server_name)
+            return None
+        if self._mcp_capability_enabled(session, "prompts") is False:
+            LOGGER.warning("MCP server '%s' does not advertise prompt support.", server_name)
+            return None
+
+        try:
+            prompts = await session.list_prompts() if hasattr(session, "list_prompts") else []
+            if prompts and prompt_name not in {getattr(prompt, "name", None) for prompt in prompts}:
+                LOGGER.warning("MCP prompt '%s' was not found on server '%s'.", prompt_name, server_name)
+                return None
+
+            result = await session.get_prompt(prompt_name)
+            return self._join_mcp_texts(
+                getattr(message, "content", None) for message in getattr(result, "messages", [])
+            )
+        except Exception as e:
+            LOGGER.warning("Failed to load MCP prompt '%s' from server '%s': %s", prompt_name, server_name, e)
+            return None
+
+    async def _get_mcp_resource_text(self, session, resource_uri: str, server_name: str) -> str | None:
+        if not hasattr(session, "read_resource"):
+            LOGGER.warning("MCP server '%s' cannot read resources with this mcp-use session.", server_name)
+            return None
+        if self._mcp_capability_enabled(session, "resources") is False:
+            LOGGER.warning("MCP server '%s' does not advertise resource support.", server_name)
+            return None
+
+        try:
+            resources = await session.list_resources() if hasattr(session, "list_resources") else []
+            if resources and resource_uri not in {str(getattr(resource, "uri", "")) for resource in resources}:
+                LOGGER.warning("MCP resource '%s' was not found on server '%s'.", resource_uri, server_name)
+                return None
+
+            result = await session.read_resource(AnyUrl(resource_uri))
+            return self._join_mcp_texts(getattr(result, "contents", []))
+        except Exception as e:
+            LOGGER.warning("Failed to read MCP resource '%s' from server '%s': %s", resource_uri, server_name, e)
+            return None
+
+    async def _get_mcp_tool_prompt_text(self, session, tool_name: str, server_name: str) -> str | None:
+        if not hasattr(session, "call_tool"):
+            LOGGER.warning("MCP server '%s' cannot call tools with this mcp-use session.", server_name)
+            return None
+        if self._mcp_capability_enabled(session, "tools") is False:
+            LOGGER.warning("MCP server '%s' does not advertise tool support for fallback prompt loading.", server_name)
+            return None
+
+        try:
+            tools = await session.list_tools() if hasattr(session, "list_tools") else []
+            if tools and tool_name not in {getattr(tool, "name", None) for tool in tools}:
+                LOGGER.warning("MCP prompt fallback tool '%s' was not found on server '%s'.", tool_name, server_name)
+                return None
+
+            result = await session.call_tool(tool_name, {})
+            if getattr(result, "isError", False):
+                LOGGER.warning("MCP prompt fallback tool '%s' returned an error on server '%s'.", tool_name, server_name)
+                return None
+
+            text = self._join_mcp_texts(getattr(result, "content", []))
+            if text:
+                return text
+
+            structured_content = getattr(result, "structuredContent", None)
+            if isinstance(structured_content, dict):
+                for key in ("prompt", "system_prompt", "instructions", "text"):
+                    value = structured_content.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+        except Exception as e:
+            LOGGER.warning(
+                "Failed to call MCP prompt fallback tool '%s' on server '%s': %s",
+                tool_name,
+                server_name,
+                e,
+            )
+            return None
+
+        return None
+
+    async def _load_mcp_server_prompt(self, config: dict) -> str | None:
+        if not self.mcp_load_server_prompt:
+            return None
+
+        server_name = self.mcp_prompt_server
+        if not server_name:
+            LOGGER.warning("MCP_LOAD_SERVER_PROMPT is true but MCP_PROMPT_SERVER is not set.")
+            return None
+
+        if server_name not in config.get("mcpServers", {}):
+            LOGGER.warning("MCP prompt server '%s' is not configured; keeping the local system prompt.", server_name)
+            return None
+
+        if not any([self.mcp_prompt_name, self.mcp_prompt_resource_uri, self.mcp_prompt_tool]):
+            LOGGER.warning(
+                "MCP_LOAD_SERVER_PROMPT is true for server '%s', but no prompt name, resource URI, "
+                "or fallback tool is configured.",
+                server_name,
+            )
+            return None
+
+        try:
+            session = self.mcp_client.get_session(server_name)
+        except ValueError:
+            try:
+                session = await self.mcp_client.create_session(server_name)
+            except Exception as e:
+                LOGGER.warning("Failed to create MCP session for prompt server '%s': %s", server_name, e)
+                return None
+
+        if session is None:
+            LOGGER.warning("MCP prompt server '%s' did not provide a usable session.", server_name)
+            return None
+
+        remote_prompt = None
+        if self.mcp_prompt_name:
+            remote_prompt = await self._get_mcp_prompt_text(session, self.mcp_prompt_name, server_name)
+
+        if not remote_prompt and self.mcp_prompt_resource_uri:
+            remote_prompt = await self._get_mcp_resource_text(session, self.mcp_prompt_resource_uri, server_name)
+
+        if not remote_prompt and self.mcp_prompt_tool:
+            remote_prompt = await self._get_mcp_tool_prompt_text(session, self.mcp_prompt_tool, server_name)
+
+        if not remote_prompt:
+            LOGGER.warning(
+                "No MCP server instructions were loaded from server '%s'; keeping the local system prompt.",
+                server_name,
+            )
+            return None
+
+        return self._merge_system_prompt(remote_prompt, server_name)
+
+    async def _create_missing_mcp_sessions(self) -> None:
+        """Create any sessions not already opened by startup prompt loading."""
+        for server_name in self.mcp_client.get_server_names():
+            if server_name not in self.mcp_client.sessions:
+                await self.mcp_client.create_session(server_name)
+
     async def initialize_mcp(self):
         """Initialize MCP client and agent with proper error handling."""
         print("Initializing MCP servers...")
@@ -183,6 +394,11 @@ class VoiceAssistant:
         try:
             # Create MCP client
             self.mcp_client = MCPClient.from_dict(config)
+            merged_prompt = await self._load_mcp_server_prompt(config)
+            if merged_prompt:
+                self.system_prompt = merged_prompt
+            if self.mcp_load_server_prompt and self.mcp_client.sessions:
+                await self._create_missing_mcp_sessions()
 
             # Create LLM
             llm = self._build_llm()
@@ -458,6 +674,12 @@ async def main():
 
     from dotenv import load_dotenv
 
+    def env_bool(name: str, default: bool = False) -> bool:
+        value = os.getenv(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
     # Load environment variables if .env exists
     load_dotenv()
 
@@ -521,6 +743,38 @@ async def main():
         default=os.getenv("MCP_CONFIG"),
         help="Path to an MCP server JSON config file. Defaults to mcp_servers.json",
     )
+    parser.add_argument(
+        "--mcp-load-server-prompt",
+        action=argparse.BooleanOptionalAction,
+        default=env_bool("MCP_LOAD_SERVER_PROMPT", False),
+        help="Load system instructions from a configured MCP server before creating the agent",
+    )
+    parser.add_argument(
+        "--mcp-prompt-server",
+        default=os.getenv("MCP_PROMPT_SERVER"),
+        help="Logical MCP server name to query for startup instructions",
+    )
+    parser.add_argument(
+        "--mcp-prompt-name",
+        default=os.getenv("MCP_PROMPT_NAME"),
+        help="Optional MCP prompt name to fetch for startup instructions",
+    )
+    parser.add_argument(
+        "--mcp-prompt-resource-uri",
+        default=os.getenv("MCP_PROMPT_RESOURCE_URI"),
+        help="Optional MCP resource URI to read for startup instructions",
+    )
+    parser.add_argument(
+        "--mcp-prompt-tool",
+        default=os.getenv("MCP_PROMPT_TOOL"),
+        help="Optional MCP fallback tool name to call for startup instructions",
+    )
+    parser.add_argument(
+        "--mcp-prompt-merge-mode",
+        default=os.getenv("MCP_PROMPT_MERGE_MODE", "append"),
+        choices=["append", "replace"],
+        help="Merge mode for MCP-loaded startup instructions",
+    )
 
     args = parser.parse_args()
     stt_language = None if args.stt_language.lower() == "auto" else args.stt_language
@@ -554,6 +808,12 @@ async def main():
         silence_threshold=args.silence_threshold,
         silence_duration=args.silence_duration,
         mcp_config=mcp_config,
+        mcp_load_server_prompt=args.mcp_load_server_prompt,
+        mcp_prompt_server=args.mcp_prompt_server,
+        mcp_prompt_name=args.mcp_prompt_name,
+        mcp_prompt_resource_uri=args.mcp_prompt_resource_uri,
+        mcp_prompt_tool=args.mcp_prompt_tool,
+        mcp_prompt_merge_mode=args.mcp_prompt_merge_mode,
         system_prompt=args.system_prompt,
     )
     await assistant.run()
