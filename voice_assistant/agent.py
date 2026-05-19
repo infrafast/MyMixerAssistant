@@ -14,6 +14,7 @@ import io
 import json
 import logging
 import os
+from pathlib import Path
 import sys
 import tempfile
 import wave
@@ -219,7 +220,18 @@ class VoiceAssistant:
             return None
         return bool(getattr(capabilities, capability_name, None))
 
-    def _build_mcp_prompt_sources(self) -> list[dict]:
+    def _build_mcp_prompt_sources(self, config: dict) -> list[dict]:
+        sources = []
+        for server_name, server_config in config.get("mcpServers", {}).items():
+            prompt_config = server_config.get("assistantPrompt") or server_config.get("agentPrompt")
+            if isinstance(prompt_config, dict):
+                source = dict(prompt_config)
+                source["server"] = server_name
+                sources.append(source)
+
+        if sources:
+            return sources
+
         if self.mcp_prompt_sources:
             return self.mcp_prompt_sources
 
@@ -359,9 +371,9 @@ class VoiceAssistant:
 
     async def _load_prompt_from_mcp_source(self, source: dict, config: dict) -> dict | None:
         server_name = self._source_value(source, "server", "server_name")
-        prompt_name = self._source_value(source, "prompt_name", "prompt", "name")
-        resource_uri = self._source_value(source, "resource_uri", "resource")
-        tool_name = self._source_value(source, "tool", "tool_name")
+        prompt_name = self._source_value(source, "promptName", "prompt_name", "prompt", "name")
+        resource_uri = self._source_value(source, "resourceUri", "resource_uri", "resource")
+        tool_name = self._source_value(source, "tool", "toolName", "tool_name")
 
         if not server_name:
             LOGGER.warning("Skipping MCP prompt source without a server name.")
@@ -424,7 +436,7 @@ class VoiceAssistant:
         if not self.mcp_load_server_prompt:
             return None
 
-        sources = self._build_mcp_prompt_sources()
+        sources = self._build_mcp_prompt_sources(config)
         if not sources:
             LOGGER.warning("MCP_LOAD_SERVER_PROMPT is true but no MCP prompt sources are configured.")
             return None
@@ -751,7 +763,6 @@ class VoiceAssistant:
 
 async def main():
     """Run the improved voice assistant."""
-    # Example usage - in production, load these from environment or config
     import argparse
 
     from dotenv import load_dotenv
@@ -762,158 +773,127 @@ async def main():
             return default
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
-    # Load environment variables if .env exists
-    load_dotenv()
-
-    parser = argparse.ArgumentParser(description="Voice-enabled AI assistant")
-    parser.add_argument("--openai-api-key", default=os.getenv("OPENAI_API_KEY"), help="OpenAI API key")
-    parser.add_argument("--elevenlabs-api-key", default=os.getenv("ELEVENLABS_API_KEY"), help="ElevenLabs API key")
-    parser.add_argument("--model", default=os.getenv("OPENAI_MODEL", "gpt-4o-mini"), help="LLM model to use")
-    parser.add_argument(
-        "--llm-provider",
-        default=os.getenv("LLM_PROVIDER", "openai"),
-        choices=["openai", "ollama"],
-        help="LLM provider to use",
-    )
-    parser.add_argument(
-        "--ollama-base-url",
-        default=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        help="Base URL for Ollama server",
-    )
-    parser.add_argument(
-        "--stt-provider",
-        default=os.getenv("STT_PROVIDER", "openai-whisper"),
-        choices=["openai-whisper", "local-whisper"],
-        help="Speech-to-text provider",
-    )
-    parser.add_argument(
-        "--local-whisper-model",
-        default=os.getenv("LOCAL_WHISPER_MODEL", "base"),
-        help="faster-whisper model size or local model path",
-    )
-    parser.add_argument(
-        "--stt-language",
-        default=os.getenv("STT_LANGUAGE", "auto"),
-        help="Speech language code for Whisper; use 'auto' to auto-detect",
-    )
-    parser.add_argument(
-        "--tts-provider",
-        default=os.getenv("TTS_PROVIDER", "elevenlabs"),
-        choices=["elevenlabs", "pyttsx3", "none"],
-        help="Text-to-speech provider",
-    )
-    parser.add_argument(
-        "--voice-id", default=os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID), help="ElevenLabs voice ID"
-    )
-    parser.add_argument(
-        "--silence-threshold",
-        type=int,
-        default=int(os.getenv("VOICE_SILENCE_THRESHOLD", "500")),
-        help="Silence detection threshold",
-    )
-    parser.add_argument(
-        "--silence-duration",
-        type=float,
-        default=float(os.getenv("VOICE_SILENCE_DURATION", "1.5")),
-        help="Silence duration",
-    )
-    parser.add_argument(
-        "--system-prompt", default=os.getenv("ASSISTANT_SYSTEM_PROMPT"), help="Custom system prompt for the assistant"
-    )
-    parser.add_argument(
-        "--mcp-config",
-        default=os.getenv("MCP_CONFIG"),
-        help="Path to an MCP server JSON config file. Defaults to mcp_servers.json",
-    )
-    parser.add_argument(
-        "--mcp-load-server-prompt",
-        action=argparse.BooleanOptionalAction,
-        default=env_bool("MCP_LOAD_SERVER_PROMPT", False),
-        help="Load system instructions from a configured MCP server before creating the agent",
-    )
-    parser.add_argument(
-        "--mcp-prompt-server",
-        default=os.getenv("MCP_PROMPT_SERVER"),
-        help="Logical MCP server name to query for startup instructions",
-    )
-    parser.add_argument(
-        "--mcp-prompt-name",
-        default=os.getenv("MCP_PROMPT_NAME"),
-        help="Optional MCP prompt name to fetch for startup instructions",
-    )
-    parser.add_argument(
-        "--mcp-prompt-resource-uri",
-        default=os.getenv("MCP_PROMPT_RESOURCE_URI"),
-        help="Optional MCP resource URI to read for startup instructions",
-    )
-    parser.add_argument(
-        "--mcp-prompt-tool",
-        default=os.getenv("MCP_PROMPT_TOOL"),
-        help="Optional MCP fallback tool name to call for startup instructions",
-    )
-    parser.add_argument(
-        "--mcp-prompt-sources",
-        default=os.getenv("MCP_PROMPT_SOURCES"),
-        help="Optional JSON list of MCP prompt sources to load in order",
-    )
-    parser.add_argument(
-        "--mcp-prompt-merge-mode",
-        default=os.getenv("MCP_PROMPT_MERGE_MODE", "append"),
-        choices=["append", "replace"],
-        help="Merge mode for MCP-loaded startup instructions",
-    )
-
-    args = parser.parse_args()
-    stt_language = None if args.stt_language.lower() == "auto" else args.stt_language
-    mcp_prompt_sources = None
-    if args.mcp_prompt_sources:
+    def env_int(name: str, default: int) -> int:
+        value = os.getenv(name)
+        if value is None or value.strip() == "":
+            return default
         try:
-            mcp_prompt_sources = json.loads(args.mcp_prompt_sources)
-            if not isinstance(mcp_prompt_sources, list) or not all(
-                isinstance(source, dict) for source in mcp_prompt_sources
-            ):
-                raise ValueError("expected a JSON list of objects")
-        except Exception as e:
-            print(f"Error: --mcp-prompt-sources must be a JSON list of objects: {e}")
+            return int(value)
+        except ValueError:
+            print(f"Error: {name} must be an integer, got: {value}")
             sys.exit(1)
 
-    print(f"Using ElevenLabs voice ID: {args.voice_id}")
-    print(f"Using LLM provider: {args.llm_provider}")
-    print(f"Using STT provider: {args.stt_provider}")
-    print(f"Using TTS provider: {args.tts_provider}")
+    def env_float(name: str, default: float) -> float:
+        value = os.getenv(name)
+        if value is None or value.strip() == "":
+            return default
+        try:
+            return float(value)
+        except ValueError:
+            print(f"Error: {name} must be a number, got: {value}")
+            sys.exit(1)
 
-    if (args.llm_provider == "openai" or args.stt_provider == "openai-whisper") and not args.openai_api_key:
+    def env_optional(name: str) -> str | None:
+        value = os.getenv(name)
+        if value is None or value.strip() == "":
+            return None
+        return value
+
+    def env_secret(name: str) -> str | None:
+        file_path = env_optional(f"{name}_FILE")
+        if not file_path:
+            return None
+
+        try:
+            with open(file_path) as secret_file:
+                secret = secret_file.read().strip()
+        except OSError as e:
+            print(f"Error: could not read {name}_FILE '{file_path}': {e}")
+            sys.exit(1)
+
+        return secret or None
+
+    parser = argparse.ArgumentParser(description="Voice-enabled AI assistant")
+    parser.add_argument(
+        "--env-file",
+        default=".env",
+        help="Environment file to load before starting the assistant (default: .env)",
+    )
+    args = parser.parse_args()
+
+    env_file = Path(args.env_file)
+    if not env_file.exists():
+        print(f"Error: env file not found: {args.env_file}")
+        print("Use one of the provided profiles, for example:")
+        print("  python voice_assistant/agent.py --env-file .env.online")
+        print("  python voice_assistant/agent.py --env-file .env.offline")
+        sys.exit(1)
+
+    load_dotenv(env_file, override=True)
+
+    openai_api_key = env_secret("OPENAI_API_KEY")
+    elevenlabs_api_key = env_secret("ELEVENLABS_API_KEY")
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    llm_provider = os.getenv("LLM_PROVIDER", "openai").lower()
+    ollama_base_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+    stt_provider = os.getenv("STT_PROVIDER", "openai-whisper").lower()
+    local_whisper_model = os.getenv("LOCAL_WHISPER_MODEL", "base")
+    stt_language_value = os.getenv("STT_LANGUAGE", "auto")
+    stt_language = None if stt_language_value.lower() == "auto" else stt_language_value
+    tts_provider = os.getenv("TTS_PROVIDER", "elevenlabs").lower()
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID)
+    silence_threshold = env_int("VOICE_SILENCE_THRESHOLD", 500)
+    silence_duration = env_float("VOICE_SILENCE_DURATION", 1.5)
+    system_prompt = env_optional("ASSISTANT_SYSTEM_PROMPT")
+    mcp_config_path = env_optional("MCP_CONFIG")
+    mcp_prompt_merge_mode = os.getenv("MCP_PROMPT_MERGE_MODE", "append").lower()
+
+    if llm_provider not in {"openai", "ollama"}:
+        print(f"Error: LLM_PROVIDER must be 'openai' or 'ollama', got: {llm_provider}")
+        sys.exit(1)
+    if stt_provider not in {"openai-whisper", "local-whisper"}:
+        print(f"Error: STT_PROVIDER must be 'openai-whisper' or 'local-whisper', got: {stt_provider}")
+        sys.exit(1)
+    if tts_provider not in {"elevenlabs", "pyttsx3", "none"}:
+        print(f"Error: TTS_PROVIDER must be 'elevenlabs', 'pyttsx3', or 'none', got: {tts_provider}")
+        sys.exit(1)
+    if mcp_prompt_merge_mode not in {"append", "replace"}:
+        print(f"Error: MCP_PROMPT_MERGE_MODE must be 'append' or 'replace', got: {mcp_prompt_merge_mode}")
+        sys.exit(1)
+
+    print(f"Using env file: {env_file}")
+    print(f"Using ElevenLabs voice ID: {voice_id}")
+    print(f"Using LLM provider: {llm_provider}")
+    print(f"Using STT provider: {stt_provider}")
+    print(f"Using TTS provider: {tts_provider}")
+
+    if (llm_provider == "openai" or stt_provider == "openai-whisper") and not openai_api_key:
         print("Error: OpenAI API key is required")
-        print("Set OPENAI_API_KEY, pass --openai-api-key, or use --llm-provider ollama --stt-provider local-whisper")
+        print("Set OPENAI_API_KEY, or use an offline env file with LLM_PROVIDER=ollama and STT_PROVIDER=local-whisper")
         sys.exit(1)
 
     mcp_config = None
-    if args.mcp_config:
-        with open(args.mcp_config) as f:
+    if mcp_config_path:
+        with open(mcp_config_path) as f:
             mcp_config = json.load(f)
 
     assistant = VoiceAssistant(
-        openai_api_key=args.openai_api_key,
-        elevenlabs_api_key=args.elevenlabs_api_key,
-        model=args.model,
-        llm_provider=args.llm_provider,
-        ollama_base_url=args.ollama_base_url,
-        stt_provider=args.stt_provider,
-        local_whisper_model=args.local_whisper_model,
+        openai_api_key=openai_api_key,
+        elevenlabs_api_key=elevenlabs_api_key,
+        model=model,
+        llm_provider=llm_provider,
+        ollama_base_url=ollama_base_url,
+        stt_provider=stt_provider,
+        local_whisper_model=local_whisper_model,
         stt_language=stt_language,
-        tts_provider=args.tts_provider,
-        elevenlabs_voice_id=args.voice_id,
-        silence_threshold=args.silence_threshold,
-        silence_duration=args.silence_duration,
+        tts_provider=tts_provider,
+        elevenlabs_voice_id=voice_id,
+        silence_threshold=silence_threshold,
+        silence_duration=silence_duration,
         mcp_config=mcp_config,
-        mcp_load_server_prompt=args.mcp_load_server_prompt,
-        mcp_prompt_server=args.mcp_prompt_server,
-        mcp_prompt_name=args.mcp_prompt_name,
-        mcp_prompt_resource_uri=args.mcp_prompt_resource_uri,
-        mcp_prompt_tool=args.mcp_prompt_tool,
-        mcp_prompt_sources=mcp_prompt_sources,
-        mcp_prompt_merge_mode=args.mcp_prompt_merge_mode,
-        system_prompt=args.system_prompt,
+        mcp_load_server_prompt=env_bool("MCP_LOAD_SERVER_PROMPT", False),
+        mcp_prompt_merge_mode=mcp_prompt_merge_mode,
+        system_prompt=system_prompt,
     )
     await assistant.run()
 

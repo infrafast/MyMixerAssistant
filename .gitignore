@@ -217,6 +217,10 @@ pids
 .env.production.local
 .env.local
 
+# Local API key files referenced by env profiles
+OPENAI_API_KEY.txt
+ELEVENLABS_API_KEY.txt
+
 # Other
 .history
 .swp

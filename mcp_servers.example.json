@@ -15,7 +15,10 @@
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem"],
-      "env": {}
+      "env": {},
+      "assistantPrompt": {
+        "resourceUri": "filesystem://prompt/system"
+      }
     },
     "github": {
       "command": "npx",
