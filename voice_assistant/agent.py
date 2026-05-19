@@ -15,8 +15,11 @@ import json
 import logging
 import os
 from pathlib import Path
+import socket
 import sys
 import tempfile
+import threading
+import time
 import wave
 
 import numpy as np
@@ -33,8 +36,117 @@ from mcp_use import MCPAgent, MCPClient
 from pydantic import AnyUrl
 
 TTS_ENGINE = pyttsx3.init()
+TTS_LOCK = threading.Lock()
 DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"  # french male; ZF6FPAbjXT4488VcRRnw = english female
 LOGGER = logging.getLogger(__name__)
+AUTO_ENV_ONLINE = Path(".env.online")
+AUTO_ENV_OFFLINE = Path(".env.offline")
+AUTO_CONNECTIVITY_HOST = "api.openai.com"
+AUTO_CONNECTIVITY_PORT = 443
+AUTO_CONNECTIVITY_TIMEOUT = 2.0
+AUTO_CHECK_INTERVAL = 10.0
+
+
+def check_internet_connection(
+    host: str = AUTO_CONNECTIVITY_HOST,
+    port: int = AUTO_CONNECTIVITY_PORT,
+    timeout: float = AUTO_CONNECTIVITY_TIMEOUT,
+) -> bool:
+    """Return whether a short TCP connection to a known internet host succeeds."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def read_secret_from_env_values(values: dict, name: str) -> str | None:
+    """Read a secret from a *_FILE entry in a parsed env profile."""
+    file_path = (values.get(f"{name}_FILE") or "").strip()
+    if not file_path:
+        return None
+
+    try:
+        secret = Path(file_path).read_text().strip()
+    except OSError as e:
+        print(f"Auto monitor could not read {name}_FILE '{file_path}': {e}")
+        return None
+
+    return secret or None
+
+
+def speak_auto_network_status(text: str, env_file: Path, dotenv_values_func) -> None:
+    """Speak a network status message with the TTS configured by the detected env file."""
+    values = dotenv_values_func(env_file)
+    tts_provider = (values.get("TTS_PROVIDER") or "elevenlabs").strip().lower()
+    voice_id = (values.get("ELEVENLABS_VOICE_ID") or DEFAULT_ELEVENLABS_VOICE_ID).strip()
+
+    with TTS_LOCK:
+        if tts_provider == "none":
+            print(f"Auto network status: {text}")
+            return
+
+        if tts_provider == "elevenlabs":
+            elevenlabs_api_key = read_secret_from_env_values(values, "ELEVENLABS_API_KEY")
+            if elevenlabs_api_key:
+                try:
+                    client = ElevenLabs(api_key=elevenlabs_api_key)
+                    audio = client.text_to_speech.convert(
+                        text=text,
+                        voice_id=voice_id,
+                        model_id="eleven_multilingual_v2",
+                        output_format="mp3_44100_128",
+                        optimize_streaming_latency="2",
+                        voice_settings=VoiceSettings(speed=1.1),
+                    )
+                    play(audio)
+                    return
+                except Exception as e:
+                    print(f"Auto network status ElevenLabs TTS failed: {e}")
+
+        try:
+            TTS_ENGINE.say(text)
+            TTS_ENGINE.runAndWait()
+        except Exception as e:
+            print(f"Auto network status local TTS failed: {e}")
+
+
+class AutoNetworkMonitor:
+    """Phase-1 auto monitor: announce internet status changes without switching runtime env."""
+
+    def __init__(self, initial_online: bool, dotenv_values_func, interval: float = AUTO_CHECK_INTERVAL):
+        self.current_online = initial_online
+        self.dotenv_values_func = dotenv_values_func
+        self.interval = interval
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="auto-network-monitor", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=2)
+
+    def announce_initial_status(self) -> None:
+        self._announce(self.current_online)
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.interval):
+            online = check_internet_connection()
+            if online == self.current_online:
+                continue
+
+            self.current_online = online
+            self._announce(online)
+
+    def _announce(self, online: bool) -> None:
+        status_text = "Internet live" if online else "Internet inactive"
+        detected_env = AUTO_ENV_ONLINE if online else AUTO_ENV_OFFLINE
+        print(f"Auto network status changed: {status_text}. Detected profile: {detected_env}")
+        speak_auto_network_status(status_text, detected_env, self.dotenv_values_func)
 
 
 class VoiceAssistant:
@@ -657,17 +769,18 @@ class VoiceAssistant:
         if self.elevenlabs_client:
             try:
                 # Generate audio using ElevenLabs
-                audio = self.elevenlabs_client.text_to_speech.convert(
-                    text=text,
-                    voice_id=self.elevenlabs_voice_id,
-                    model_id="eleven_multilingual_v2",  # Best for high-quality output and multilingual
-                    output_format="mp3_44100_128",  # Balanced quality + size
-                    optimize_streaming_latency="2",  # Optional: best for real-time feel without delay
-                    voice_settings=VoiceSettings(speed=1.1),
-                )
+                with TTS_LOCK:
+                    audio = self.elevenlabs_client.text_to_speech.convert(
+                        text=text,
+                        voice_id=self.elevenlabs_voice_id,
+                        model_id="eleven_multilingual_v2",  # Best for high-quality output and multilingual
+                        output_format="mp3_44100_128",  # Balanced quality + size
+                        optimize_streaming_latency="2",  # Optional: best for real-time feel without delay
+                        voice_settings=VoiceSettings(speed=1.1),
+                    )
 
-                # Play the audio
-                play(audio)
+                    # Play the audio
+                    play(audio)
                 return True
             except Exception as e:
                 print(f"ElevenLabs TTS failed: {e}")
@@ -680,8 +793,9 @@ class VoiceAssistant:
     def text_to_speech_pyttsx3(self, text: str) -> bool:
         """Speak text through the local system TTS engine."""
         try:
-            TTS_ENGINE.say(text)
-            TTS_ENGINE.runAndWait()
+            with TTS_LOCK:
+                TTS_ENGINE.say(text)
+                TTS_ENGINE.runAndWait()
             return True
         except Exception as e:
             print(f"Local pyttsx3 TTS failed: {e}")
@@ -765,7 +879,7 @@ async def main():
     """Run the improved voice assistant."""
     import argparse
 
-    from dotenv import load_dotenv
+    from dotenv import dotenv_values, load_dotenv
 
     def env_bool(name: str, default: bool = False) -> bool:
         value = os.getenv(name)
@@ -821,12 +935,24 @@ async def main():
     )
     args = parser.parse_args()
 
-    env_file = Path(args.env_file)
+    auto_monitor = None
+    auto_env_mode = args.env_file.strip().lower() == "auto"
+    if auto_env_mode:
+        internet_online = check_internet_connection()
+        env_file = AUTO_ENV_ONLINE if internet_online else AUTO_ENV_OFFLINE
+        print(
+            "Auto env mode selected "
+            f"{env_file} because internet is {'live' if internet_online else 'inactive'}."
+        )
+    else:
+        env_file = Path(args.env_file)
+
     if not env_file.exists():
-        print(f"Error: env file not found: {args.env_file}")
+        print(f"Error: env file not found: {env_file}")
         print("Use one of the provided profiles, for example:")
         print("  python voice_assistant/agent.py --env-file .env.online")
         print("  python voice_assistant/agent.py --env-file .env.offline")
+        print("  python voice_assistant/agent.py --env-file auto")
         sys.exit(1)
 
     load_dotenv(env_file, override=True)
@@ -895,7 +1021,21 @@ async def main():
         mcp_prompt_merge_mode=mcp_prompt_merge_mode,
         system_prompt=system_prompt,
     )
-    await assistant.run()
+
+    if auto_env_mode:
+        auto_monitor = AutoNetworkMonitor(
+            initial_online=internet_online,
+            dotenv_values_func=dotenv_values,
+            interval=AUTO_CHECK_INTERVAL,
+        )
+        auto_monitor.announce_initial_status()
+        auto_monitor.start()
+
+    try:
+        await assistant.run()
+    finally:
+        if auto_monitor:
+            auto_monitor.stop()
 
 
 if __name__ == "__main__":
