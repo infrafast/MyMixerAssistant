@@ -178,6 +178,7 @@ MCP_PROMPT_SERVER=mixer                         # Logical server name from mcp_s
 MCP_PROMPT_NAME=xmseries_mixer_assistant        # Optional MCP prompt name
 MCP_PROMPT_RESOURCE_URI=xmseries://prompt/system # Optional MCP resource URI
 MCP_PROMPT_TOOL=osc_get_agent_prompt            # Optional fallback tool name
+MCP_PROMPT_SOURCES='[{"server":"mixer","prompt_name":"xmseries_mixer_assistant"},{"server":"lights","resource_uri":"lights://prompt/system"}]' # Optional multi-server JSON list
 MCP_PROMPT_MERGE_MODE=append                    # append | replace, default append
 
 # Optional - MCP Server Specific
@@ -225,7 +226,7 @@ config = {
 
 By default, the assistant uses only the local `ASSISTANT_SYSTEM_PROMPT` or the built-in prompt in `voice_assistant/agent.py`.
 
-You can optionally ask the assistant to load additional system instructions from one configured MCP server before `MCPAgent` is created. This is useful when a server wants to expose domain-specific behavior, tool usage rules, or operator guidance without hard-coding that content in the voice assistant.
+You can optionally ask the assistant to load additional system instructions from one or more configured MCP servers before `MCPAgent` is created. This is useful when servers want to expose domain-specific behavior, tool usage rules, or operator guidance without hard-coding that content in the voice assistant.
 
 Enable it with:
 
@@ -255,7 +256,7 @@ The assistant tries only the sources you configure, in this order:
 
 It never calls arbitrary tools while loading startup instructions. If the server is missing, does not support prompts/resources, does not expose the configured fallback tool, or returns an error, the assistant logs a warning and continues with the local prompt.
 
-Example configuration:
+Single-server example configuration:
 
 ```bash
 MCP_LOAD_SERVER_PROMPT=true
@@ -266,15 +267,55 @@ MCP_PROMPT_TOOL=osc_get_agent_prompt
 MCP_PROMPT_MERGE_MODE=append
 ```
 
-With `MCP_PROMPT_MERGE_MODE=append`, the local prompt stays first and the remote instructions are appended under:
+For several MCP servers, use `MCP_PROMPT_SOURCES`. It is an ordered JSON list. When it is set, it takes precedence over the single-source variables `MCP_PROMPT_SERVER`, `MCP_PROMPT_NAME`, `MCP_PROMPT_RESOURCE_URI`, and `MCP_PROMPT_TOOL`.
+
+Multi-server example configuration:
+
+```bash
+MCP_LOAD_SERVER_PROMPT=true
+MCP_PROMPT_SOURCES='[
+  {"server":"mixer","prompt_name":"xmseries_mixer_assistant"},
+  {"server":"lights","resource_uri":"lights://prompt/system"},
+  {"server":"stage","tool":"stage_get_agent_prompt"}
+]'
+MCP_PROMPT_MERGE_MODE=append
+```
+
+Each source can define:
+
+1. `server`: required, the logical server name under `mcpServers`
+2. `prompt_name`: optional MCP prompt name
+3. `resource_uri`: optional MCP resource URI
+4. `tool`: optional explicit fallback tool name
+
+For each source, the assistant tries `prompt_name`, then `resource_uri`, then `tool`. It then moves to the next source. A failing source logs a warning and does not block the others.
+
+At startup, when instructions are loaded, the assistant writes a console log entry listing the MCP prompt sources that were actually merged, for example:
 
 ```text
-Additional instructions loaded from MCP server "mixer":
+Loaded and merged 2 MCP prompt source(s) with merge mode 'append': mixer via prompt 'xmseries_mixer_assistant'; lights via resource 'lights://prompt/system'
+```
+
+With `MCP_PROMPT_MERGE_MODE=append`, the local prompt stays first and the remote instructions are appended under:
+
+example:
+python voice_assistant/agent.py --mcp-load-server-prompt --mcp-prompt-server mixer  --mcp-prompt-sources '[{"server":"mixer","prompt_name":"xmseries_mixer_assistant"}]' --mcp-prompt-merge-mode append 
+
+
+```text
+Additional instructions loaded from MCP servers:
+Instructions loaded from MCP server "mixer":
+...
+
+Instructions loaded from MCP server "lights":
+...
 ```
 
 This mode preserves the local voice constraints, including concise TTS-friendly replies, same-language answers, plain text only, and no emojis, markdown, bullets, or decorative characters.
 
-With `MCP_PROMPT_MERGE_MODE=replace`, only the remote instructions are used. Choose this only if the MCP server prompt already contains all voice and formatting constraints needed by the assistant.
+Even with several MCP prompt sources, `MCP_PROMPT_MERGE_MODE` still has a role: the loaded MCP prompts are always combined together in the configured order, and this setting decides whether that combined block is appended to the local assistant prompt or replaces it.
+
+With `MCP_PROMPT_MERGE_MODE=replace`, only the loaded remote instructions are used. Choose this only if the MCP server prompts already contain all voice and formatting constraints needed by the assistant.
 
 The same settings can be provided through CLI flags:
 
@@ -285,6 +326,15 @@ python voice_assistant/agent.py \
   --mcp-prompt-name xmseries_mixer_assistant \
   --mcp-prompt-resource-uri xmseries://prompt/system \
   --mcp-prompt-tool osc_get_agent_prompt \
+  --mcp-prompt-merge-mode append
+```
+
+Multi-server CLI example:
+
+```bash
+python voice_assistant/agent.py \
+  --mcp-load-server-prompt \
+  --mcp-prompt-sources '[{"server":"mixer","prompt_name":"xmseries_mixer_assistant"},{"server":"lights","resource_uri":"lights://prompt/system"}]' \
   --mcp-prompt-merge-mode append
 ```
 
@@ -331,6 +381,12 @@ python voice_assistant/agent.py \
   --mcp-load-server-prompt \
   --mcp-prompt-server mixer \
   --mcp-prompt-name xmseries_mixer_assistant \
+  --mcp-prompt-merge-mode append
+
+# Load startup instructions from several configured MCP servers
+python voice_assistant/agent.py \
+  --mcp-load-server-prompt \
+  --mcp-prompt-sources '[{"server":"mixer","prompt_name":"xmseries_mixer_assistant"},{"server":"lights","resource_uri":"lights://prompt/system"}]' \
   --mcp-prompt-merge-mode append
 
 # See all available options
@@ -497,8 +553,10 @@ assistant = VoiceAssistant(
 
 4. **MCP Startup Instructions Not Loaded**
    - Confirm `MCP_LOAD_SERVER_PROMPT=true` or pass `--mcp-load-server-prompt`
-   - Confirm `MCP_PROMPT_SERVER` matches a key under `mcpServers`
-   - Configure at least one of `MCP_PROMPT_NAME`, `MCP_PROMPT_RESOURCE_URI`, or `MCP_PROMPT_TOOL`
+   - For single-source mode, confirm `MCP_PROMPT_SERVER` matches a key under `mcpServers`
+   - For multi-source mode, confirm every `server` in `MCP_PROMPT_SOURCES` matches a key under `mcpServers`
+   - Configure at least one of `MCP_PROMPT_NAME`, `MCP_PROMPT_RESOURCE_URI`, or `MCP_PROMPT_TOOL`, or provide `MCP_PROMPT_SOURCES`
+   - Ensure `MCP_PROMPT_SOURCES` is valid JSON when using multi-source mode
    - Check the startup warnings for unsupported prompts/resources or a missing fallback tool
    - Use `MCP_PROMPT_MERGE_MODE=append` when you want to keep the local voice and TTS constraints
 

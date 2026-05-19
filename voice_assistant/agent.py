@@ -59,6 +59,7 @@ class VoiceAssistant:
         mcp_prompt_name: str | None = None,
         mcp_prompt_resource_uri: str | None = None,
         mcp_prompt_tool: str | None = None,
+        mcp_prompt_sources: list[dict] | None = None,
         mcp_prompt_merge_mode: str = "append",
         notes_dir: str | None = None,
         system_prompt: str | None = None,
@@ -84,6 +85,7 @@ class VoiceAssistant:
             mcp_prompt_name: Optional MCP prompt name to fetch
             mcp_prompt_resource_uri: Optional MCP resource URI to read
             mcp_prompt_tool: Optional fallback MCP tool name to call for prompt text
+            mcp_prompt_sources: Optional ordered list of MCP prompt sources
             mcp_prompt_merge_mode: How to merge remote instructions: append or replace
             notes_dir: Directory for storing notes (default: temp dir)
             system_prompt: Optional custom system prompt for the assistant
@@ -128,6 +130,7 @@ class VoiceAssistant:
         self.mcp_prompt_name = mcp_prompt_name
         self.mcp_prompt_resource_uri = mcp_prompt_resource_uri
         self.mcp_prompt_tool = mcp_prompt_tool
+        self.mcp_prompt_sources = mcp_prompt_sources or []
         self.mcp_prompt_merge_mode = (mcp_prompt_merge_mode or "append").lower()
         self.mcp_client = None
         self.agent = None
@@ -216,7 +219,47 @@ class VoiceAssistant:
             return None
         return bool(getattr(capabilities, capability_name, None))
 
-    def _merge_system_prompt(self, remote_prompt: str, server_name: str) -> str:
+    def _build_mcp_prompt_sources(self) -> list[dict]:
+        if self.mcp_prompt_sources:
+            return self.mcp_prompt_sources
+
+        if not any([self.mcp_prompt_server, self.mcp_prompt_name, self.mcp_prompt_resource_uri, self.mcp_prompt_tool]):
+            return []
+
+        return [
+            {
+                "server": self.mcp_prompt_server,
+                "prompt_name": self.mcp_prompt_name,
+                "resource_uri": self.mcp_prompt_resource_uri,
+                "tool": self.mcp_prompt_tool,
+            }
+        ]
+
+    def _source_value(self, source: dict, *keys: str) -> str | None:
+        for key in keys:
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    def _format_loaded_mcp_prompts(self, loaded_prompts: list[dict]) -> str:
+        sections = []
+        for item in loaded_prompts:
+            server_name = item["server"]
+            text = item["text"].strip()
+            sections.append(f'Instructions loaded from MCP server "{server_name}":\n{text}')
+        return "\n\n".join(sections)
+
+    def _describe_loaded_mcp_prompts(self, loaded_prompts: list[dict]) -> str:
+        descriptions = []
+        for item in loaded_prompts:
+            source_type = item.get("source_type") or "unknown"
+            source_id = item.get("source_id") or "unspecified"
+            descriptions.append(f"{item['server']} via {source_type} '{source_id}'")
+        return "; ".join(descriptions)
+
+    def _merge_system_prompt(self, loaded_prompts: list[dict]) -> str:
+        remote_prompt = self._format_loaded_mcp_prompts(loaded_prompts)
         if self.mcp_prompt_merge_mode == "replace":
             return remote_prompt
 
@@ -228,8 +271,8 @@ class VoiceAssistant:
 
         return (
             f"{self.system_prompt.rstrip()}\n\n"
-            f'Additional instructions loaded from MCP server "{server_name}":\n'
-            f"{remote_prompt.strip()}"
+            "Additional instructions loaded from MCP servers:\n"
+            f"{remote_prompt}"
         )
 
     async def _get_mcp_prompt_text(self, session, prompt_name: str, server_name: str) -> str | None:
@@ -314,23 +357,23 @@ class VoiceAssistant:
 
         return None
 
-    async def _load_mcp_server_prompt(self, config: dict) -> str | None:
-        if not self.mcp_load_server_prompt:
-            return None
+    async def _load_prompt_from_mcp_source(self, source: dict, config: dict) -> dict | None:
+        server_name = self._source_value(source, "server", "server_name")
+        prompt_name = self._source_value(source, "prompt_name", "prompt", "name")
+        resource_uri = self._source_value(source, "resource_uri", "resource")
+        tool_name = self._source_value(source, "tool", "tool_name")
 
-        server_name = self.mcp_prompt_server
         if not server_name:
-            LOGGER.warning("MCP_LOAD_SERVER_PROMPT is true but MCP_PROMPT_SERVER is not set.")
+            LOGGER.warning("Skipping MCP prompt source without a server name.")
             return None
 
         if server_name not in config.get("mcpServers", {}):
-            LOGGER.warning("MCP prompt server '%s' is not configured; keeping the local system prompt.", server_name)
+            LOGGER.warning("MCP prompt server '%s' is not configured; skipping this prompt source.", server_name)
             return None
 
-        if not any([self.mcp_prompt_name, self.mcp_prompt_resource_uri, self.mcp_prompt_tool]):
+        if not any([prompt_name, resource_uri, tool_name]):
             LOGGER.warning(
-                "MCP_LOAD_SERVER_PROMPT is true for server '%s', but no prompt name, resource URI, "
-                "or fallback tool is configured.",
+                "MCP prompt source for server '%s' has no prompt name, resource URI, or fallback tool configured.",
                 server_name,
             )
             return None
@@ -349,23 +392,62 @@ class VoiceAssistant:
             return None
 
         remote_prompt = None
-        if self.mcp_prompt_name:
-            remote_prompt = await self._get_mcp_prompt_text(session, self.mcp_prompt_name, server_name)
+        source_type = None
+        source_id = None
+        if prompt_name:
+            remote_prompt = await self._get_mcp_prompt_text(session, prompt_name, server_name)
+            source_type = "prompt"
+            source_id = prompt_name
 
-        if not remote_prompt and self.mcp_prompt_resource_uri:
-            remote_prompt = await self._get_mcp_resource_text(session, self.mcp_prompt_resource_uri, server_name)
+        if not remote_prompt and resource_uri:
+            remote_prompt = await self._get_mcp_resource_text(session, resource_uri, server_name)
+            source_type = "resource"
+            source_id = resource_uri
 
-        if not remote_prompt and self.mcp_prompt_tool:
-            remote_prompt = await self._get_mcp_tool_prompt_text(session, self.mcp_prompt_tool, server_name)
+        if not remote_prompt and tool_name:
+            remote_prompt = await self._get_mcp_tool_prompt_text(session, tool_name, server_name)
+            source_type = "tool"
+            source_id = tool_name
 
         if not remote_prompt:
-            LOGGER.warning(
-                "No MCP server instructions were loaded from server '%s'; keeping the local system prompt.",
-                server_name,
-            )
+            LOGGER.warning("No MCP server instructions were loaded from server '%s'.", server_name)
             return None
 
-        return self._merge_system_prompt(remote_prompt, server_name)
+        return {
+            "server": server_name,
+            "source_type": source_type,
+            "source_id": source_id,
+            "text": remote_prompt,
+        }
+
+    async def _load_mcp_server_prompt(self, config: dict) -> str | None:
+        if not self.mcp_load_server_prompt:
+            return None
+
+        sources = self._build_mcp_prompt_sources()
+        if not sources:
+            LOGGER.warning("MCP_LOAD_SERVER_PROMPT is true but no MCP prompt sources are configured.")
+            return None
+
+        loaded_prompts = []
+        for source in sources:
+            loaded_prompt = await self._load_prompt_from_mcp_source(source, config)
+            if loaded_prompt:
+                loaded_prompts.append(loaded_prompt)
+
+        if not loaded_prompts:
+            LOGGER.warning("No MCP server instructions were loaded; keeping the local system prompt.")
+            return None
+
+        loaded_summary = self._describe_loaded_mcp_prompts(loaded_prompts)
+        log_message = (
+            f"Loaded and merged {len(loaded_prompts)} MCP prompt source(s) "
+            f"with merge mode '{self.mcp_prompt_merge_mode}': {loaded_summary}"
+        )
+        print(log_message)
+        LOGGER.info(log_message)
+
+        return self._merge_system_prompt(loaded_prompts)
 
     async def _create_missing_mcp_sessions(self) -> None:
         """Create any sessions not already opened by startup prompt loading."""
@@ -770,6 +852,11 @@ async def main():
         help="Optional MCP fallback tool name to call for startup instructions",
     )
     parser.add_argument(
+        "--mcp-prompt-sources",
+        default=os.getenv("MCP_PROMPT_SOURCES"),
+        help="Optional JSON list of MCP prompt sources to load in order",
+    )
+    parser.add_argument(
         "--mcp-prompt-merge-mode",
         default=os.getenv("MCP_PROMPT_MERGE_MODE", "append"),
         choices=["append", "replace"],
@@ -778,6 +865,17 @@ async def main():
 
     args = parser.parse_args()
     stt_language = None if args.stt_language.lower() == "auto" else args.stt_language
+    mcp_prompt_sources = None
+    if args.mcp_prompt_sources:
+        try:
+            mcp_prompt_sources = json.loads(args.mcp_prompt_sources)
+            if not isinstance(mcp_prompt_sources, list) or not all(
+                isinstance(source, dict) for source in mcp_prompt_sources
+            ):
+                raise ValueError("expected a JSON list of objects")
+        except Exception as e:
+            print(f"Error: --mcp-prompt-sources must be a JSON list of objects: {e}")
+            sys.exit(1)
 
     print(f"Using ElevenLabs voice ID: {args.voice_id}")
     print(f"Using LLM provider: {args.llm_provider}")
@@ -813,6 +911,7 @@ async def main():
         mcp_prompt_name=args.mcp_prompt_name,
         mcp_prompt_resource_uri=args.mcp_prompt_resource_uri,
         mcp_prompt_tool=args.mcp_prompt_tool,
+        mcp_prompt_sources=mcp_prompt_sources,
         mcp_prompt_merge_mode=args.mcp_prompt_merge_mode,
         system_prompt=args.system_prompt,
     )
