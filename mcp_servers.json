@@ -1,10 +1,14 @@
 {
   "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["@playwright/mcp@latest"],
+    "mixer": {
+      "command": "node",
+      "args": [
+        "/Users/ts/Documents/PlatformIO/Projects/XMSeries-MCP/dist/index.js"
+      ],
       "env": {
-        "DISPLAY": ":1"
+        "OSC_HOST": "192.168.0.1",
+        "OSC_PORT": "10023",
+        "OSC_PROTOCOL": "OSCXR"        
       }
     }
   }

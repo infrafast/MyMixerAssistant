@@ -33,7 +33,8 @@
         <img src="https://dcbadge.limes.pink/api/server/XkNkSkMz3V?style=flat" /></a>
 </p>
 
-A voice-enabled AI personal assistant that leverages the Model Context Protocol (MCP) to integrate multiple tools and services through natural voice interactions.
+This is a voice-enabled AI personal assistant that leverages the Model Context Protocol (MCP) to integrate multiple tools and services through natural voice interactions.
+It is more specifically design for assisting live musician that gives commands to drive a digital mixer, a DMX console or other on stage equipment.
 
 ## Features
 
@@ -226,8 +227,8 @@ python voice_assistant/agent.py
 # Override specific settings via command line
 python voice_assistant/agent.py --model gpt-4o-mini --silence-threshold 300
 
-# Use Ollama local model
-python voice_assistant/agent.py --llm-provider ollama --model qwen3:8b
+# Example how to use only local model
+python voice_assistant/agent.py --llm-provider ollama --model qwen3:8b --local-whisper-model base --tts-provider pyttsx3
 
 # Offline mode after local models and MCP packages are cached
 python voice_assistant/agent.py \
@@ -377,6 +378,16 @@ assistant = VoiceAssistant(
 )
 ```
 
+### Evolutions
+
+1. introduce a "thinking" looping sound which is played between the user prompt and until the TTS reply to the user so he has a semantic feedback that his request is being processed
+2. add a web page to configure all the environement variables
+3. if agent.py is called with parameter "--auto" , add a mecasnism to check internet connexion at startup and then monitor it at periodic interval (every 10sec.) so the system can determine dynamically which configuration he uses (offline or online) to use the right provider for TTS, STT and LLM. This forces and superseed all parameters
+4. 
+
+1. **No Audio Input Detected**
+
+
 ## Troubleshooting
 
 ### Common Issues
@@ -410,30 +421,3 @@ assistant = VoiceAssistant(
    - Confirm the command includes `--mcp-config mcp_servers.offline.json`
    - Ensure the Ollama model, faster-whisper model, and MCP npm packages were cached before disconnecting
 
-## Contributing
-
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Built on top of [mcp-use](https://github.com/modelcontextprotocol/mcp-use)
-- Uses [OpenAI Whisper](https://openai.com/research/whisper) for speech recognition
-- Voice synthesis powered by [ElevenLabs](https://elevenlabs.io)
-- MCP servers from the [Model Context Protocol](https://modelcontextprotocol.org) ecosystem
-
-## Support
-
-- 📧 Email: your.email@example.com
-- 💬 Discord: [Join our server](https://discord.gg/yourinvite)
-- 🐛 Issues: [GitHub Issues](https://github.com/yourusername/mcp-voice-assistant/issues)
-- 📖 Documentation: [Full Docs](https://docs.yourproject.com)
