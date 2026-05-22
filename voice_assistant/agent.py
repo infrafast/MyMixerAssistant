@@ -176,6 +176,7 @@ class VoiceAssistant:
         stt_language: str | None = None,
         tts_provider: str = "elevenlabs",
         elevenlabs_voice_id: str = DEFAULT_ELEVENLABS_VOICE_ID,
+        thinking_sound_file: str = "thinking.wav",
         silence_threshold: int = 500,
         silence_duration: float = 1.5,
         mcp_config: dict | None = None,
@@ -203,6 +204,7 @@ class VoiceAssistant:
             stt_language: Transcription language code, or None for auto-detect
             tts_provider: Text-to-speech provider (elevenlabs, pyttsx3, or none)
             elevenlabs_voice_id: ElevenLabs voice ID (default: Rachel)
+            thinking_sound_file: WAV file to loop while the LLM/MCP agent is processing a command
             silence_threshold: Audio silence detection threshold
             silence_duration: How long to wait after speech stops
             mcp_config: Optional MCP server configuration dict
@@ -250,6 +252,20 @@ class VoiceAssistant:
         if self.tts_provider == "elevenlabs" and elevenlabs_api_key:
             self.elevenlabs_client = ElevenLabs(api_key=elevenlabs_api_key)
 
+        # Short audio feedback while the agent is processing the user's command.
+        self.thinking_sound_file = thinking_sound_file or "thinking.wav"
+        self.thinking_sound_path = self._resolve_asset_path(self.thinking_sound_file)
+        self.thinking_sound = None
+        self.thinking_sound_channel = None
+        self.thinking_sound_warning_shown = False
+        self.thinking_sound_lock = threading.Lock()
+        if self.thinking_sound_path:
+            try:
+                self.thinking_sound = pygame.mixer.Sound(str(self.thinking_sound_path))
+            except pygame.error as e:
+                print(f"Could not load thinking sound '{self.thinking_sound_path}': {e}")
+                self.thinking_sound_warning_shown = True
+
         # MCP configuration
         self.mcp_config = mcp_config
         self.mcp_load_server_prompt = mcp_load_server_prompt
@@ -286,6 +302,44 @@ class VoiceAssistant:
         os.makedirs(self.notes_dir, exist_ok=True)
 
         self._log_configured_mcp_prompt_sources()
+
+    def _resolve_asset_path(self, value: str) -> Path | None:
+        """Resolve a configured asset path, falling back to ./assets for bare filenames."""
+        configured_path = Path(value).expanduser()
+        if configured_path.is_absolute() and configured_path.exists():
+            return configured_path
+
+        if configured_path.exists():
+            return configured_path
+
+        assets_path = Path("assets") / configured_path
+        if assets_path.exists():
+            return assets_path
+
+        return None
+
+    def start_thinking_sound(self) -> None:
+        """Loop the configured thinking sound until stop_thinking_sound is called."""
+        if not self.thinking_sound:
+            if not self.thinking_sound_warning_shown:
+                print(
+                    f"Thinking sound '{self.thinking_sound_file}' not found. "
+                    "Set THINKING_SOUND_FILE to a WAV file or place it in assets/."
+                )
+                self.thinking_sound_warning_shown = True
+            return
+
+        with self.thinking_sound_lock:
+            if self.thinking_sound_channel and self.thinking_sound_channel.get_busy():
+                return
+            self.thinking_sound_channel = self.thinking_sound.play(loops=-1)
+
+    def stop_thinking_sound(self) -> None:
+        """Stop the thinking sound if it is currently playing."""
+        with self.thinking_sound_lock:
+            if self.thinking_sound_channel:
+                self.thinking_sound_channel.stop()
+                self.thinking_sound_channel = None
 
     def _substitute_env_vars(self, config):
         """Recursively substitute environment variable placeholders in config."""
@@ -901,6 +955,7 @@ class VoiceAssistant:
         if not self.agent:
             return "Sorry, the assistant is not properly initialized."
 
+        self.start_thinking_sound()
         try:
             response = await self.agent.run(text)
             return response
@@ -913,6 +968,8 @@ class VoiceAssistant:
                     "or reduce enabled MCP servers/tools."
                 )
             return f"Sorry, I encountered an error: {error_text}"
+        finally:
+            self.stop_thinking_sound()
 
     async def run(self):
         """Main loop for the voice assistant."""
@@ -979,6 +1036,7 @@ class VoiceAssistant:
             return "exit"
         finally:
             # Cleanup
+            self.stop_thinking_sound()
             self.audio.terminate()
             pygame.mixer.quit()
             if self.mcp_client and self.mcp_client.sessions:
@@ -1068,6 +1126,7 @@ async def main():
         stt_language = None if stt_language_value.lower() == "auto" else stt_language_value
         tts_provider = os.getenv("TTS_PROVIDER", "elevenlabs").lower()
         voice_id = os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID)
+        thinking_sound_file = os.getenv("THINKING_SOUND_FILE", "thinking.wav")
         silence_threshold = env_int("VOICE_SILENCE_THRESHOLD", 500)
         silence_duration = env_float("VOICE_SILENCE_DURATION", 1.5)
         system_prompt = env_optional("ASSISTANT_SYSTEM_PROMPT")
@@ -1092,6 +1151,7 @@ async def main():
         print(f"Using LLM provider: {llm_provider}")
         print(f"Using STT provider: {stt_provider}")
         print(f"Using TTS provider: {tts_provider}")
+        print(f"Using thinking sound file: {thinking_sound_file}")
 
         if (llm_provider == "openai" or stt_provider == "openai-whisper") and not openai_api_key:
             print("Error: OpenAI API key is required")
@@ -1124,6 +1184,7 @@ async def main():
             stt_language=stt_language,
             tts_provider=tts_provider,
             elevenlabs_voice_id=voice_id,
+            thinking_sound_file=thinking_sound_file,
             silence_threshold=silence_threshold,
             silence_duration=silence_duration,
             mcp_config=mcp_config,

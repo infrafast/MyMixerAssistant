@@ -168,6 +168,7 @@ ELEVENLABS_VOICE_ID=ZF6FPAbjXT4488VcRRnw      # Default: Rachel voice
 # Optional - Audio Configuration
 VOICE_SILENCE_THRESHOLD=500                     # Lower = more sensitive
 VOICE_SILENCE_DURATION=1.5                      # Seconds to wait after speech
+THINKING_SOUND_FILE=thinking.wav                # WAV loop while the LLM/MCP agent processes the command
 
 # Optional - Assistant Configuration
 ASSISTANT_SYSTEM_PROMPT="You are a helpful voice assistant..."  # Customize personality
@@ -415,6 +416,7 @@ ELEVENLABS_VOICE_ID=1EmYoP3UnnnwhlJKovEy
 
 VOICE_SILENCE_THRESHOLD=500
 VOICE_SILENCE_DURATION=1.5
+THINKING_SOUND_FILE=thinking.wav
 
 MCP_CONFIG non défini, donc `mcp_servers.json` est utilisé si présent
 MCP_LOAD_SERVER_PROMPT=false
