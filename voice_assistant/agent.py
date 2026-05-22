@@ -1076,31 +1076,35 @@ class VoiceAssistant:
                     print("Auto environment reload requested. Stopping current assistant.")
                     return "reload"
 
-                # Record audio or get text input
-                audio_data = self.record_audio()
-                if self.reload_event and self.reload_event.is_set():
-                    print("Auto environment reload requested. Stopping current assistant.")
-                    return "reload"
-                if not audio_data:
-                    continue
+                text = self.web_monitor.pop_injected_command() if self.web_monitor else None
+                if text:
+                    print(f"Injected command consumed: {text}")
+                else:
+                    # Record audio or get text input
+                    audio_data = self.record_audio()
+                    if self.reload_event and self.reload_event.is_set():
+                        print("Auto environment reload requested. Stopping current assistant.")
+                        return "reload"
+                    if not audio_data:
+                        continue
 
-                # Convert to text
-                text = self.audio_to_text(audio_data)
-                if self.reload_event and self.reload_event.is_set():
-                    print("Auto environment reload requested. Stopping current assistant.")
-                    return "reload"
-                if not text:
-                    continue
+                    # Convert to text
+                    text = self.audio_to_text(audio_data)
+                    if self.reload_event and self.reload_event.is_set():
+                        print("Auto environment reload requested. Stopping current assistant.")
+                        return "reload"
+                    if not text:
+                        continue
 
-                should_process, matched_wake_word, command_text = apply_wake_word(text, self.wake_words)
-                if not should_process:
-                    print("Wake word not detected. Ignoring transcription.")
-                    continue
-                if matched_wake_word:
-                    print(f"Wake word detected: {matched_wake_word}")
-                    if command_text != text:
-                        print(f"Command after wake word: {command_text}")
-                text = command_text
+                    should_process, matched_wake_word, command_text = apply_wake_word(text, self.wake_words)
+                    if not should_process:
+                        print("Wake word not detected. Ignoring transcription.")
+                        continue
+                    if matched_wake_word:
+                        print(f"Wake word detected: {matched_wake_word}")
+                        if command_text != text:
+                            print(f"Command after wake word: {command_text}")
+                    text = command_text
 
                 # Process command
                 process_task = asyncio.create_task(self.process_command(text))
