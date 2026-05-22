@@ -229,9 +229,11 @@ The monitor exposes:
 - **Console Log**: the same Python console output mirrored into the page
 - **Prompt**: the final system prompt after local and MCP-provided prompt merge
 
-Injected commands are treated as direct text input after wake word handling. This means the text entered in **Inject Command** should be the command itself, without the wake word. After the monitor accepts the command, the input is cleared. The agent consumes the queued command before starting the next microphone recording and logs it as consumed before processing it.
+The console output path is centralized for Python `stdout` and `stderr`: the same filtered text is written to the terminal and to **Console Log**. High-frequency OSC heartbeat reads for `/xremote` and `/xinfo` are filtered out in both places; other OSC reads and writes remain visible when they pass through the Python console stream.
 
-This first implementation intentionally keeps the monitor decoupled from the assistant logic. The web page only queues text; the agent remains responsible for consuming and processing it. If the assistant is already inside microphone recording when a command is injected, the command is picked up on the next loop.
+Injected commands are treated as direct text input after wake word handling. This means the text entered in **Inject Command** should be the command itself, without the wake word. After the monitor accepts the command, the input is cleared. The agent logs the command as consumed before processing it.
+
+The monitor remains decoupled from the assistant logic. The web page only queues text; the agent remains responsible for consuming and processing it. If the assistant is already inside microphone recording when a command is injected, the recording loop stops early and the queued command is consumed immediately after the microphone stream closes.
 
 ### Online and Offline Profiles
 

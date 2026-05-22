@@ -50,9 +50,8 @@ class TeeStream:
         self.stream_name = stream_name
 
     def write(self, value: str) -> int:
-        written = self.original.write(value)
-        self.monitor.append_log(value, source=self.stream_name)
-        return written
+        self.monitor.write_console(value, self.original, source=self.stream_name)
+        return len(value)
 
     def flush(self) -> None:
         self.original.flush()
@@ -208,6 +207,20 @@ class WebMonitor:
         if not filtered_value:
             return
 
+        self._append_filtered_log(filtered_value)
+
+    def write_console(self, value: str, original: TextIO, source: str = "stdout") -> None:
+        if not value:
+            return
+
+        filtered_value = self._filter_log_value(value)
+        if not filtered_value:
+            return
+
+        original.write(filtered_value)
+        self._append_filtered_log(filtered_value)
+
+    def _append_filtered_log(self, filtered_value: str) -> None:
         with self._lock:
             self._log_chunks.append(filtered_value)
             self._log_chars += len(filtered_value)

@@ -334,6 +334,7 @@ class VoiceAssistant:
         self.agent = None
         self.reload_event = reload_event
         self.web_monitor = web_monitor
+        self.pending_injected_command: str | None = None
         
         #self.system_prompt = system_prompt or (
         #    "You are a helpful voice assistant with access to various tools. Your name is mcp-use "
@@ -851,6 +852,13 @@ class VoiceAssistant:
             has_speech = False
 
             while True:
+                if self.web_monitor:
+                    injected_command = self.web_monitor.pop_injected_command()
+                    if injected_command:
+                        self.pending_injected_command = injected_command
+                        print("Injected command received while listening. Stopping microphone capture.")
+                        break
+
                 if self.reload_event and self.reload_event.is_set():
                     print("Auto environment reload requested while recording.")
                     break
@@ -871,6 +879,9 @@ class VoiceAssistant:
 
             stream.stop_stream()
             stream.close()
+
+            if self.pending_injected_command:
+                return None
 
             if self.reload_event and self.reload_event.is_set():
                 return None
@@ -1076,7 +1087,10 @@ class VoiceAssistant:
                     print("Auto environment reload requested. Stopping current assistant.")
                     return "reload"
 
-                text = self.web_monitor.pop_injected_command() if self.web_monitor else None
+                text = self.pending_injected_command
+                self.pending_injected_command = None
+                if not text and self.web_monitor:
+                    text = self.web_monitor.pop_injected_command()
                 if text:
                     print(f"Injected command consumed: {text}")
                 else:
