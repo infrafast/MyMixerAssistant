@@ -44,7 +44,9 @@ It is more specifically design for assisting live musician that gives commands t
 - 🌐 **Multiple Model Providers**: Works with OpenAI or local Ollama models that support tool calling
 - 🛠️ **Multi-Tool Integration**: Seamlessly connects to any MCP servers:
 - 🧭 **MCP-provided Startup Instructions**: Optionally loads system instructions from MCP prompts, resources, or one configured fallback tool
+- 🖥️ **Local Web Monitor**: Read-only runtime state, active config, console logs, final prompt, and manual command injection
 - 💾 **Conversational Memory**: Maintains context across interactions
+- 🗣️ **Optional Wake Word**: Gate spoken commands with a global wake word after STT transcription
 - 🎯 **Extensible**: Easy to add new MCP servers and capabilities
 - 📴 **Offline Mode**: Can run with Ollama, local Whisper, pyttsx3, and local MCP servers after models/packages are installed
 
@@ -192,6 +194,44 @@ LINEAR_API_KEY=your-linear-api-key              # For Linear integration
 The assistant is configured from an environment file. The CLI intentionally accepts only `--env-file` plus `--help`, so the selected `.env` file is the single source of truth for runtime settings.
 
 The assistant treats current external state as time-sensitive. Conversation memory can preserve context and follow-up references, but when the user asks for the current state of anything outside the conversation, the agent is instructed to call the relevant MCP read tool before answering. Set `MCP_AGENT_MEMORY_ENABLED=false` only if you want to disable MCPAgent conversation memory entirely.
+
+### Wake Word
+
+`WAKE_WORD` is optional. When it is empty, the assistant keeps the current behavior and processes every successful transcription. When it is set, spoken transcriptions are processed only if the wake word appears at the start of the phrase or very close to it.
+
+For example, with `WAKE_WORD=Mixeur`, all of these are accepted and the command text after the wake word is sent to the agent:
+
+```text
+Mixeur, monte le volume
+Salut Mixeur, monte le volume
+Dis Mixeur, monte le volume
+```
+
+If multiple variants are needed, separate them with a comma, semicolon, or pipe:
+
+```bash
+WAKE_WORD=Mixeur,Mixer
+```
+
+### Web Monitor
+
+When `WEB_MONITOR_ENABLED=true`, the assistant starts a local web monitor and prints its URL at startup, by default:
+
+```text
+Web monitor available at http://127.0.0.1:8765
+```
+
+The monitor exposes:
+
+- **State**: current online/offline status, selected env profile, and LLM/STT/TTS/MCP status indicators
+- **Inject Command**: a text input that queues a command for the agent
+- **Config**: read-only active env and MCP JSON configuration with secrets redacted
+- **Console Log**: the same Python console output mirrored into the page
+- **Prompt**: the final system prompt after local and MCP-provided prompt merge
+
+Injected commands are treated as direct text input after wake word handling. This means the text entered in **Inject Command** should be the command itself, without the wake word. After the monitor accepts the command, the input is cleared. The agent consumes the queued command before starting the next microphone recording and logs it as consumed before processing it.
+
+This first implementation intentionally keeps the monitor decoupled from the assistant logic. The web page only queues text; the agent remains responsible for consuming and processing it. If the assistant is already inside microphone recording when a command is injected, the command is picked up on the next loop.
 
 ### Online and Offline Profiles
 
