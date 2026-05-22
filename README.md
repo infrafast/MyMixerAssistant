@@ -170,6 +170,11 @@ VOICE_SILENCE_THRESHOLD=500                     # Lower = more sensitive
 VOICE_SILENCE_DURATION=1.5                      # Seconds to wait after speech
 THINKING_SOUND_FILE=thinking.wav                # WAV loop while the LLM/MCP agent processes the command
 
+# Optional - Read-only local web monitor
+WEB_MONITOR_ENABLED=true                        # Serve runtime state, config, logs, and final prompt
+WEB_MONITOR_HOST=127.0.0.1
+WEB_MONITOR_PORT=8765
+
 # Optional - Assistant Configuration
 ASSISTANT_SYSTEM_PROMPT="You are a helpful voice assistant..."  # Customize personality
 MCP_AGENT_MEMORY_ENABLED=true                  # Keep conversational memory; live external state still requires MCP reads

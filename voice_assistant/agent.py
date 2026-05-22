@@ -34,6 +34,11 @@ from langchain_openai import ChatOpenAI
 from mcp_use import MCPAgent, MCPClient
 from pydantic import AnyUrl
 
+try:
+    from .web_monitor import WebMonitor, build_service_state
+except ImportError:
+    from web_monitor import WebMonitor, build_service_state
+
 TTS_ENGINE = pyttsx3.init()
 TTS_LOCK = threading.Lock()
 DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"  # french male; ZF6FPAbjXT4488VcRRnw = english female
@@ -154,11 +159,13 @@ class AutoNetworkMonitor:
         initial_online: bool,
         dotenv_values_func,
         reload_event: threading.Event | None = None,
+        web_monitor: WebMonitor | None = None,
         interval: float = AUTO_CHECK_INTERVAL,
     ):
         self.current_online = initial_online
         self.dotenv_values_func = dotenv_values_func
         self.reload_event = reload_event
+        self.web_monitor = web_monitor
         self.interval = interval
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
@@ -190,6 +197,8 @@ class AutoNetworkMonitor:
         status_text = "Internet est en ligne" if online else "Connexion internet coupée"
         detected_env = AUTO_ENV_ONLINE if online else AUTO_ENV_OFFLINE
         print(f"Auto network status changed: {status_text}. Detected profile: {detected_env}")
+        if self.web_monitor:
+            self.web_monitor.update(internet=online, env_file=detected_env, mode="auto")
         speak_auto_network_status(status_text, detected_env, self.dotenv_values_func)
 
     @property
@@ -227,6 +236,7 @@ class VoiceAssistant:
         notes_dir: str | None = None,
         system_prompt: str | None = None,
         reload_event: threading.Event | None = None,
+        web_monitor: WebMonitor | None = None,
     ):
         """Initialize the voice assistant.
 
@@ -256,6 +266,7 @@ class VoiceAssistant:
             notes_dir: Directory for storing notes (default: temp dir)
             system_prompt: Optional custom system prompt for the assistant
             reload_event: Optional event used by auto mode to interrupt and reload the assistant
+            web_monitor: Optional read-only web monitor for runtime state
         """
         # Audio configuration
         self.audio_format = pyaudio.paInt16
@@ -317,6 +328,7 @@ class VoiceAssistant:
         self.mcp_client = None
         self.agent = None
         self.reload_event = reload_event
+        self.web_monitor = web_monitor
         
         #self.system_prompt = system_prompt or (
         #    "You are a helpful voice assistant with access to various tools. Your name is mcp-use "
@@ -333,6 +345,8 @@ class VoiceAssistant:
             "Behave like a friendly calm and motivating assistant."
         )
         self.system_prompt = f"{base_system_prompt.rstrip()} {EXTERNAL_STATE_FRESHNESS_RULE}"
+        if self.web_monitor:
+            self.web_monitor.update(prompt=self.system_prompt)
 
         # Create a proper notes directory
         if notes_dir:
@@ -752,6 +766,10 @@ class VoiceAssistant:
     async def initialize_mcp(self):
         """Initialize MCP client and agent with proper error handling."""
         print("Initializing MCP servers...")
+        if self.web_monitor:
+            self.web_monitor.update(
+                services={"MCP": {"status": "initializing", "detail": "opening configured sessions"}}
+            )
         config = {"mcpServers": {}}
 
         # Use provided config or load from file
@@ -773,6 +791,8 @@ class VoiceAssistant:
             merged_prompt = await self._load_mcp_server_prompt(config)
             if merged_prompt:
                 self.system_prompt = merged_prompt
+            if self.web_monitor:
+                self.web_monitor.update(prompt=self.system_prompt)
             if self.mcp_load_server_prompt and self.mcp_client.sessions:
                 await self._create_missing_mcp_sessions()
 
@@ -790,10 +810,16 @@ class VoiceAssistant:
             await self.agent.initialize()
 
             print("✓ MCP servers initialized successfully!")
+            if self.web_monitor:
+                server_names = sorted(config.get("mcpServers", {}).keys())
+                detail = ", ".join(server_names) if server_names else "no configured servers"
+                self.web_monitor.update(services={"MCP": {"status": "initialized", "detail": detail}})
             return True
 
         except Exception as e:
             print(f"✗ Error initializing MCP: {e}")
+            if self.web_monitor:
+                self.web_monitor.update(services={"MCP": {"status": "error", "detail": str(e)}})
             return False
 
     def detect_silence(self, audio_data: bytes) -> bool:
@@ -1164,7 +1190,11 @@ async def main():
         for key in env_keys:
             os.environ.pop(key, None)
 
-    def build_assistant_from_env(env_file: Path, reload_event: threading.Event | None = None) -> VoiceAssistant:
+    def build_assistant_from_env(
+        env_file: Path,
+        reload_event: threading.Event | None = None,
+        web_monitor: WebMonitor | None = None,
+    ) -> VoiceAssistant:
         """Load one env profile and build a fresh assistant instance from it."""
         clear_profiles = [env_file]
         if auto_env_mode:
@@ -1232,6 +1262,24 @@ async def main():
                 print(f"Error: invalid JSON in MCP_CONFIG '{mcp_config_path}': {e}")
                 sys.exit(1)
 
+        if web_monitor:
+            env_values = dict(dotenv_values(env_file))
+            internet_status = env_file == AUTO_ENV_ONLINE if auto_env_mode else "unknown"
+            web_monitor.update(
+                mode="auto" if auto_env_mode else "fixed",
+                env_file=env_file,
+                internet=internet_status,
+                env_values=env_values,
+                mcp_config=mcp_config or {},
+                services=build_service_state(
+                    llm_provider=llm_provider,
+                    model=model,
+                    stt_provider=stt_provider,
+                    tts_provider=tts_provider,
+                    mcp_config=mcp_config,
+                ),
+            )
+
         return VoiceAssistant(
             openai_api_key=openai_api_key,
             elevenlabs_api_key=elevenlabs_api_key,
@@ -1252,6 +1300,7 @@ async def main():
             mcp_agent_memory_enabled=mcp_agent_memory_enabled,
             system_prompt=system_prompt,
             reload_event=reload_event,
+            web_monitor=web_monitor,
         )
 
     parser = argparse.ArgumentParser(description="Voice-enabled AI assistant")
@@ -1263,10 +1312,11 @@ async def main():
     args = parser.parse_args()
 
     auto_env_mode = args.env_file.strip().lower() == "auto"
+    auto_selection_message = None
     if auto_env_mode:
         internet_online = check_internet_connection()
         env_file = AUTO_ENV_ONLINE if internet_online else AUTO_ENV_OFFLINE
-        print(
+        auto_selection_message = (
             "Auto env mode selected "
             f"{env_file} because internet is {'live' if internet_online else 'inactive'}."
         )
@@ -1281,9 +1331,44 @@ async def main():
         print("  python voice_assistant/agent.py --env-file auto")
         sys.exit(1)
 
+    profile_values = dotenv_values(env_file)
+    web_enabled = (profile_values.get("WEB_MONITOR_ENABLED") or "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    web_host = (profile_values.get("WEB_MONITOR_HOST") or "127.0.0.1").strip()
+    try:
+        web_port = int((profile_values.get("WEB_MONITOR_PORT") or "8765").strip())
+    except ValueError:
+        print(f"Error: WEB_MONITOR_PORT must be an integer, got: {profile_values.get('WEB_MONITOR_PORT')}")
+        sys.exit(1)
+
+    web_monitor = None
+    if web_enabled:
+        web_monitor = WebMonitor()
+        web_monitor.install_console_capture()
+        try:
+            actual_host, actual_port = web_monitor.start(web_host, web_port)
+            print(f"Web monitor available at http://{actual_host}:{actual_port}")
+        except OSError as e:
+            web_monitor.restore_console_capture()
+            web_monitor = None
+            print(f"Web monitor disabled: could not bind {web_host}:{web_port}: {e}")
+
+    if auto_selection_message:
+        print(auto_selection_message)
+
     if not auto_env_mode:
-        assistant = build_assistant_from_env(env_file)
-        await assistant.run()
+        assistant = build_assistant_from_env(env_file, web_monitor=web_monitor)
+        try:
+            await assistant.run()
+        finally:
+            if web_monitor:
+                web_monitor.stop()
+                web_monitor.restore_console_capture()
         return
 
     reload_event = threading.Event()
@@ -1291,6 +1376,7 @@ async def main():
         initial_online=internet_online,
         dotenv_values_func=dotenv_values,
         reload_event=reload_event,
+        web_monitor=web_monitor,
         interval=AUTO_CHECK_INTERVAL,
     )
     auto_monitor.announce_initial_status()
@@ -1305,7 +1391,7 @@ async def main():
                 sys.exit(1)
 
             reload_event.clear()
-            assistant = build_assistant_from_env(env_file, reload_event=reload_event)
+            assistant = build_assistant_from_env(env_file, reload_event=reload_event, web_monitor=web_monitor)
             if announce_reload_complete:
                 await assistant.text_to_speech("Environnement mis à jour. La demande en cours a été annulée.")
                 announce_reload_complete = False
@@ -1319,6 +1405,9 @@ async def main():
             announce_reload_complete = True
     finally:
         auto_monitor.stop()
+        if web_monitor:
+            web_monitor.stop()
+            web_monitor.restore_console_capture()
 
 
 if __name__ == "__main__":
