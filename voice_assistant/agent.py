@@ -348,6 +348,10 @@ class VoiceAssistant:
             "Be concise in your responses since they will be spoken aloud and have to be suitable for text-to-speech and API calls.. Summarize your results. "
             "Reply in the same language as the user's latest request whenever possible. "
             "Use plain text only. Do not use emojis, emoticons, markdown, bullets, symbols, or decorative characters. "
+            "For spoken numeric values, write negative numbers with words: say 'moins 11 dB' in French "
+            "and 'minus 11 dB' in English instead of '-11 dB'. "
+            "Write measurement units in words for text-to-speech: say 'décibels' in French or 'decibels' "
+            "in English instead of 'dB', and 'volts' instead of 'V'. "
             "Behave like a friendly calm and motivating assistant."
         )
         self.system_prompt = f"{base_system_prompt.rstrip()} {EXTERNAL_STATE_FRESHNESS_RULE}"
