@@ -176,6 +176,7 @@ WEB_MONITOR_HOST=127.0.0.1
 WEB_MONITOR_PORT=8765
 
 # Optional - Assistant Configuration
+WAKE_WORD=                                      # Empty keeps current behavior; set e.g. "Mixeur" to gate commands
 ASSISTANT_SYSTEM_PROMPT="You are a helpful voice assistant..."  # Customize personality
 MCP_AGENT_MEMORY_ENABLED=true                  # Keep conversational memory; live external state still requires MCP reads
 MCP_CONFIG=mcp_servers.offline.json             # Optional config override

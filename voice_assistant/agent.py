@@ -36,8 +36,10 @@ from pydantic import AnyUrl
 
 try:
     from .web_monitor import WebMonitor, build_service_state
+    from .wake_word import apply_wake_word, parse_wake_words
 except ImportError:
     from web_monitor import WebMonitor, build_service_state
+    from wake_word import apply_wake_word, parse_wake_words
 
 TTS_ENGINE = pyttsx3.init()
 TTS_LOCK = threading.Lock()
@@ -224,6 +226,7 @@ class VoiceAssistant:
         thinking_sound_file: str = "thinking.wav",
         silence_threshold: int = 500,
         silence_duration: float = 1.5,
+        wake_words: list[str] | None = None,
         mcp_config: dict | None = None,
         mcp_load_server_prompt: bool = False,
         mcp_prompt_server: str | None = None,
@@ -254,6 +257,7 @@ class VoiceAssistant:
             thinking_sound_file: WAV file to loop while the LLM/MCP agent is processing a command
             silence_threshold: Audio silence detection threshold
             silence_duration: How long to wait after speech stops
+            wake_words: Optional global wake word variants used to gate command processing
             mcp_config: Optional MCP server configuration dict
             mcp_load_server_prompt: Whether to load extra system instructions from an MCP server
             mcp_prompt_server: Logical MCP server name to query for instructions
@@ -275,6 +279,7 @@ class VoiceAssistant:
         self.chunk = 1024
         self.silence_threshold = silence_threshold
         self.silence_duration = silence_duration
+        self.wake_words = wake_words or []
 
         # Initialize audio components
         self.audio = pyaudio.PyAudio()
@@ -1087,6 +1092,16 @@ class VoiceAssistant:
                 if not text:
                     continue
 
+                should_process, matched_wake_word, command_text = apply_wake_word(text, self.wake_words)
+                if not should_process:
+                    print("Wake word not detected. Ignoring transcription.")
+                    continue
+                if matched_wake_word:
+                    print(f"Wake word detected: {matched_wake_word}")
+                    if command_text != text:
+                        print(f"Command after wake word: {command_text}")
+                text = command_text
+
                 # Process command
                 process_task = asyncio.create_task(self.process_command(text))
                 while not process_task.done():
@@ -1216,6 +1231,7 @@ async def main():
         thinking_sound_file = os.getenv("THINKING_SOUND_FILE", "thinking.wav")
         silence_threshold = env_int("VOICE_SILENCE_THRESHOLD", 500)
         silence_duration = env_float("VOICE_SILENCE_DURATION", 1.5)
+        wake_words = parse_wake_words(env_optional("WAKE_WORD"))
         system_prompt = env_optional("ASSISTANT_SYSTEM_PROMPT")
         mcp_config_path = env_optional("MCP_CONFIG")
         mcp_prompt_merge_mode = os.getenv("MCP_PROMPT_MERGE_MODE", "append").lower()
@@ -1240,6 +1256,7 @@ async def main():
         print(f"Using STT provider: {stt_provider}")
         print(f"Using TTS provider: {tts_provider}")
         print(f"Using thinking sound file: {thinking_sound_file}")
+        print(f"Using wake word: {', '.join(wake_words) if wake_words else 'disabled'}")
         print(f"Using MCP agent memory: {mcp_agent_memory_enabled}")
 
         if (llm_provider == "openai" or stt_provider == "openai-whisper") and not openai_api_key:
@@ -1294,6 +1311,7 @@ async def main():
             thinking_sound_file=thinking_sound_file,
             silence_threshold=silence_threshold,
             silence_duration=silence_duration,
+            wake_words=wake_words,
             mcp_config=mcp_config,
             mcp_load_server_prompt=env_bool("MCP_LOAD_SERVER_PROMPT", False),
             mcp_prompt_merge_mode=mcp_prompt_merge_mode,
