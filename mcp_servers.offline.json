@@ -18,7 +18,8 @@
       "env": {
         "OSC_HOST": "192.168.0.1",
         "OSC_PORT": "10023",
-        "OSC_PROTOCOL": "OSCXR"
+        "OSC_PROTOCOL": "OSCXR",
+        "DEBUG": "${DEBUG}"
       },
       "assistantPrompt": {
         "promptName": "xmseries_mixer_assistant",
