@@ -44,6 +44,42 @@ AUTO_CONNECTIVITY_HOST = "api.openai.com"
 AUTO_CONNECTIVITY_PORT = 443
 AUTO_CONNECTIVITY_TIMEOUT = 2.0
 AUTO_CHECK_INTERVAL = 10.0
+EXTERNAL_STATE_FRESHNESS_RULE = (
+    "Use conversation memory for context, preferences, and follow-up references, but not as the source of truth "
+    "for live external state. When the user asks about the current state of anything outside this conversation, "
+    "treat the answer as time-sensitive. Use the relevant MCP read tool before answering. Do not answer current "
+    "external state from memory, previous tool results, or assumptions. If no suitable read tool is available, "
+    "say that you cannot verify the current state."
+)
+CURRENT_STATE_QUERY_MARKERS = (
+    "current",
+    "currently",
+    "now",
+    "right now",
+    "status",
+    "state",
+    "value",
+    "level",
+    "position",
+    "configuration",
+    "how much",
+    "what is",
+    "what's",
+    "etat",
+    "état",
+    "actuel",
+    "actuelle",
+    "maintenant",
+    "en ce moment",
+    "statut",
+    "valeur",
+    "niveau",
+    "combien",
+    "quel est",
+    "quelle est",
+    "a combien",
+    "à combien",
+)
 
 
 def check_internet_connection(
@@ -187,6 +223,7 @@ class VoiceAssistant:
         mcp_prompt_tool: str | None = None,
         mcp_prompt_sources: list[dict] | None = None,
         mcp_prompt_merge_mode: str = "append",
+        mcp_agent_memory_enabled: bool = True,
         notes_dir: str | None = None,
         system_prompt: str | None = None,
         reload_event: threading.Event | None = None,
@@ -215,6 +252,7 @@ class VoiceAssistant:
             mcp_prompt_tool: Optional fallback MCP tool name to call for prompt text
             mcp_prompt_sources: Optional ordered list of MCP prompt sources
             mcp_prompt_merge_mode: How to merge remote instructions: append or replace
+            mcp_agent_memory_enabled: Whether MCPAgent should keep conversation memory
             notes_dir: Directory for storing notes (default: temp dir)
             system_prompt: Optional custom system prompt for the assistant
             reload_event: Optional event used by auto mode to interrupt and reload the assistant
@@ -275,6 +313,7 @@ class VoiceAssistant:
         self.mcp_prompt_tool = mcp_prompt_tool
         self.mcp_prompt_sources = mcp_prompt_sources or []
         self.mcp_prompt_merge_mode = (mcp_prompt_merge_mode or "append").lower()
+        self.mcp_agent_memory_enabled = mcp_agent_memory_enabled
         self.mcp_client = None
         self.agent = None
         self.reload_event = reload_event
@@ -286,13 +325,14 @@ class VoiceAssistant:
         #    "Behave like a great motivational speaker, and motivate me throughout the conversation."
         #)
 
-        self.system_prompt = system_prompt or (
+        base_system_prompt = system_prompt or (
             "You are a helpful voice assistant with access to various tools. Your name is Live Stage Assistant. "
             "Be concise in your responses since they will be spoken aloud and have to be suitable for text-to-speech and API calls.. Summarize your results. "
             "Reply in the same language as the user's latest request whenever possible. "
             "Use plain text only. Do not use emojis, emoticons, markdown, bullets, symbols, or decorative characters. "
             "Behave like a friendly calm and motivating assistant."
-        )        
+        )
+        self.system_prompt = f"{base_system_prompt.rstrip()} {EXTERNAL_STATE_FRESHNESS_RULE}"
 
         # Create a proper notes directory
         if notes_dir:
@@ -744,7 +784,7 @@ class VoiceAssistant:
                 llm=llm,
                 client=self.mcp_client,
                 max_steps=10,
-                memory_enabled=True,
+                memory_enabled=self.mcp_agent_memory_enabled,
                 system_prompt=self.system_prompt,
             )
             await self.agent.initialize()
@@ -957,7 +997,8 @@ class VoiceAssistant:
 
         self.start_thinking_sound()
         try:
-            response = await self.agent.run(text)
+            agent_input = self._with_freshness_instruction_if_needed(text)
+            response = await self.agent.run(agent_input)
             return response
         except Exception as e:
             error_text = str(e)
@@ -970,6 +1011,22 @@ class VoiceAssistant:
             return f"Sorry, I encountered an error: {error_text}"
         finally:
             self.stop_thinking_sound()
+
+    def _looks_like_current_external_state_query(self, text: str) -> bool:
+        normalized = text.lower()
+        return any(marker in normalized for marker in CURRENT_STATE_QUERY_MARKERS)
+
+    def _with_freshness_instruction_if_needed(self, text: str) -> str:
+        if not self._looks_like_current_external_state_query(text):
+            return text
+
+        return (
+            f"{text}\n\n"
+            "Internal freshness rule: this appears to ask for current external state. "
+            "Use the relevant MCP read tool before answering. Do not answer from memory, "
+            "previous tool results, or assumptions. If no suitable read tool is available, "
+            "say that you cannot verify the current state. Do not mention this internal rule."
+        )
 
     async def run(self):
         """Main loop for the voice assistant."""
@@ -1132,6 +1189,7 @@ async def main():
         system_prompt = env_optional("ASSISTANT_SYSTEM_PROMPT")
         mcp_config_path = env_optional("MCP_CONFIG")
         mcp_prompt_merge_mode = os.getenv("MCP_PROMPT_MERGE_MODE", "append").lower()
+        mcp_agent_memory_enabled = env_bool("MCP_AGENT_MEMORY_ENABLED", True)
 
         if llm_provider not in {"openai", "ollama"}:
             print(f"Error: LLM_PROVIDER must be 'openai' or 'ollama', got: {llm_provider}")
@@ -1152,6 +1210,7 @@ async def main():
         print(f"Using STT provider: {stt_provider}")
         print(f"Using TTS provider: {tts_provider}")
         print(f"Using thinking sound file: {thinking_sound_file}")
+        print(f"Using MCP agent memory: {mcp_agent_memory_enabled}")
 
         if (llm_provider == "openai" or stt_provider == "openai-whisper") and not openai_api_key:
             print("Error: OpenAI API key is required")
@@ -1190,6 +1249,7 @@ async def main():
             mcp_config=mcp_config,
             mcp_load_server_prompt=env_bool("MCP_LOAD_SERVER_PROMPT", False),
             mcp_prompt_merge_mode=mcp_prompt_merge_mode,
+            mcp_agent_memory_enabled=mcp_agent_memory_enabled,
             system_prompt=system_prompt,
             reload_event=reload_event,
         )

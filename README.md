@@ -172,6 +172,7 @@ THINKING_SOUND_FILE=thinking.wav                # WAV loop while the LLM/MCP age
 
 # Optional - Assistant Configuration
 ASSISTANT_SYSTEM_PROMPT="You are a helpful voice assistant..."  # Customize personality
+MCP_AGENT_MEMORY_ENABLED=true                  # Keep conversational memory; live external state still requires MCP reads
 MCP_CONFIG=mcp_servers.offline.json             # Optional config override
 
 # Optional - MCP-provided Assistant Instructions
@@ -183,6 +184,8 @@ LINEAR_API_KEY=your-linear-api-key              # For Linear integration
 ```
 
 The assistant is configured from an environment file. The CLI intentionally accepts only `--env-file` plus `--help`, so the selected `.env` file is the single source of truth for runtime settings.
+
+The assistant treats current external state as time-sensitive. Conversation memory can preserve context and follow-up references, but when the user asks for the current state of anything outside the conversation, the agent is instructed to call the relevant MCP read tool before answering. Set `MCP_AGENT_MEMORY_ENABLED=false` only if you want to disable MCPAgent conversation memory entirely.
 
 ### Online and Offline Profiles
 
