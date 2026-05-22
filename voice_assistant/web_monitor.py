@@ -79,6 +79,7 @@ class WebMonitor:
         self._lock = threading.RLock()
         self._log_chunks: deque[str] = deque()
         self._log_chars = 0
+        self._injected_commands: deque[str] = deque()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stdout_original: TextIO | None = None
@@ -130,6 +131,12 @@ class WebMonitor:
                         return
                     self.send_error(404)
 
+                def do_POST(self) -> None:
+                    if self.path == "/api/inject-command":
+                        self._handle_inject_command()
+                        return
+                    self.send_error(404)
+
                 def log_message(self, format: str, *args: Any) -> None:
                     return
 
@@ -149,6 +156,27 @@ class WebMonitor:
                     self.send_header("Content-Length", str(len(encoded)))
                     self.end_headers()
                     self.wfile.write(encoded)
+
+                def _handle_inject_command(self) -> None:
+                    try:
+                        length = int(self.headers.get("Content-Length", "0"))
+                    except ValueError:
+                        length = 0
+
+                    raw_body = self.rfile.read(min(length, 16_384))
+                    try:
+                        payload = json.loads(raw_body.decode("utf-8") or "{}")
+                    except json.JSONDecodeError:
+                        self.send_error(400, "Invalid JSON")
+                        return
+
+                    command = str(payload.get("command") or "").strip()
+                    if not command:
+                        self.send_error(400, "Command is required")
+                        return
+
+                    monitor.inject_command(command)
+                    self._send_json({"accepted": True})
 
             self._server = ThreadingHTTPServer((host, port), MonitorHandler)
             self._thread = threading.Thread(
@@ -186,6 +214,22 @@ class WebMonitor:
             while self._log_chars > self.max_log_chars and self._log_chunks:
                 self._log_chars -= len(self._log_chunks.popleft())
             self._snapshot["updated_at"] = time.time()
+
+    def inject_command(self, command: str) -> None:
+        cleaned_command = command.strip()
+        if not cleaned_command:
+            return
+
+        with self._lock:
+            self._injected_commands.append(cleaned_command)
+            self._snapshot["updated_at"] = time.time()
+
+    def pop_injected_command(self) -> str | None:
+        with self._lock:
+            if not self._injected_commands:
+                return None
+            self._snapshot["updated_at"] = time.time()
+            return self._injected_commands.popleft()
 
     def _filter_log_value(self, value: str) -> str:
         lines = value.splitlines(keepends=True)
@@ -337,6 +381,41 @@ INDEX_HTML = """<!doctype html>
       grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
       gap: 10px;
     }
+    .inject-form {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      padding: 14px;
+    }
+    input {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0 10px;
+      background: color-mix(in srgb, var(--panel) 92%, var(--bg));
+      color: var(--text);
+      font: inherit;
+      outline: none;
+    }
+    input:focus {
+      border-color: var(--accent);
+    }
+    button {
+      min-height: 38px;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      padding: 0 14px;
+      background: var(--accent);
+      color: white;
+      font: inherit;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
     .tile {
       min-height: 74px;
       border: 1px solid var(--border);
@@ -396,6 +475,15 @@ INDEX_HTML = """<!doctype html>
   <main>
     <section>
       <details open>
+        <summary>Inject Command</summary>
+        <form class="inject-form" id="inject-form">
+          <input id="inject-command" autocomplete="off">
+          <button id="inject-submit" type="submit">Send</button>
+        </form>
+      </details>
+    </section>
+    <section>
+      <details open>
         <summary>State</summary>
         <div class="state" id="state"></div>
       </details>
@@ -425,6 +513,9 @@ INDEX_HTML = """<!doctype html>
     const logsEl = document.querySelector("#logs");
     const promptEl = document.querySelector("#prompt");
     const metaEl = document.querySelector("#meta");
+    const injectForm = document.querySelector("#inject-form");
+    const injectCommand = document.querySelector("#inject-command");
+    const injectSubmit = document.querySelector("#inject-submit");
 
     function ledClass(status) {
       const value = String(status || "unknown").toLowerCase();
@@ -467,6 +558,29 @@ INDEX_HTML = """<!doctype html>
 
     refresh();
     setInterval(refresh, 1500);
+
+    injectForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const command = injectCommand.value.trim();
+      if (!command) return;
+
+      injectSubmit.disabled = true;
+      try {
+        const response = await fetch("/api/inject-command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command })
+        });
+        if (!response.ok) throw new Error(await response.text());
+        injectCommand.value = "";
+        await refresh();
+      } catch (error) {
+        metaEl.textContent = `inject failed: ${error}`;
+      } finally {
+        injectSubmit.disabled = false;
+        injectCommand.focus();
+      }
+    });
   </script>
 </body>
 </html>
