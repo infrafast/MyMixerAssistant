@@ -9,7 +9,8 @@ from pathlib import Path
 import sys
 import threading
 import time
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO
+from urllib.parse import parse_qs, urlparse
 
 
 SECRET_KEY_MARKERS = (
@@ -83,6 +84,8 @@ class WebMonitor:
         self._thread: threading.Thread | None = None
         self._stdout_original: TextIO | None = None
         self._stderr_original: TextIO | None = None
+        self._llm_options_handler: Callable[[str | None], dict[str, Any]] | None = None
+        self._llm_config_save_handler: Callable[[str, str], dict[str, Any]] | None = None
         self._started_at = time.time()
         self._snapshot: dict[str, Any] = {
             "mode": "unknown",
@@ -94,6 +97,17 @@ class WebMonitor:
             "prompt": "",
             "updated_at": time.time(),
         }
+
+    def set_llm_config_handlers(
+        self,
+        *,
+        options_handler: Callable[[str | None], dict[str, Any]],
+        save_handler: Callable[[str, str], dict[str, Any]],
+    ) -> None:
+        """Register callbacks used by the web UI to list and save LLM settings."""
+        with self._lock:
+            self._llm_options_handler = options_handler
+            self._llm_config_save_handler = save_handler
 
     def install_console_capture(self) -> None:
         with self._lock:
@@ -122,17 +136,24 @@ class WebMonitor:
 
             class MonitorHandler(BaseHTTPRequestHandler):
                 def do_GET(self) -> None:
-                    if self.path in {"/", "/index.html"}:
+                    parsed = urlparse(self.path)
+                    if parsed.path in {"/", "/index.html"}:
                         self._send_text(INDEX_HTML, "text/html; charset=utf-8")
                         return
-                    if self.path == "/api/snapshot":
+                    if parsed.path == "/api/snapshot":
                         self._send_json(monitor.snapshot())
+                        return
+                    if parsed.path == "/api/llm-options":
+                        self._handle_llm_options(parsed.query)
                         return
                     self.send_error(404)
 
                 def do_POST(self) -> None:
                     if self.path == "/api/inject-command":
                         self._handle_inject_command()
+                        return
+                    if self.path == "/api/llm-config":
+                        self._handle_llm_config_save()
                         return
                     self.send_error(404)
 
@@ -156,17 +177,70 @@ class WebMonitor:
                     self.end_headers()
                     self.wfile.write(encoded)
 
-                def _handle_inject_command(self) -> None:
+                def _read_json_body(self, max_bytes: int = 16_384) -> dict[str, Any] | None:
                     try:
                         length = int(self.headers.get("Content-Length", "0"))
                     except ValueError:
                         length = 0
 
-                    raw_body = self.rfile.read(min(length, 16_384))
+                    raw_body = self.rfile.read(min(length, max_bytes))
                     try:
                         payload = json.loads(raw_body.decode("utf-8") or "{}")
                     except json.JSONDecodeError:
                         self.send_error(400, "Invalid JSON")
+                        return None
+                    if not isinstance(payload, dict):
+                        self.send_error(400, "JSON object required")
+                        return None
+                    return payload
+
+                def _handle_llm_options(self, query: str) -> None:
+                    handler = monitor._llm_options_handler
+                    if handler is None:
+                        self.send_error(503, "LLM configuration is not available")
+                        return
+
+                    provider_values = parse_qs(query).get("provider") or [None]
+                    provider = provider_values[0]
+                    try:
+                        result = handler(provider)
+                    except Exception as e:
+                        self.send_error(500, f"Could not list LLM options: {e}")
+                        return
+                    self._send_json(result)
+
+                def _handle_llm_config_save(self) -> None:
+                    handler = monitor._llm_config_save_handler
+                    if handler is None:
+                        self.send_error(503, "LLM configuration is not available")
+                        return
+
+                    payload = self._read_json_body()
+                    if payload is None:
+                        return
+
+                    provider = str(payload.get("provider") or "").strip().lower()
+                    model = str(payload.get("model") or "").strip()
+                    if not provider:
+                        self.send_error(400, "Provider is required")
+                        return
+                    if not model:
+                        self.send_error(400, "LLM model is required")
+                        return
+
+                    try:
+                        result = handler(provider, model)
+                    except ValueError as e:
+                        self.send_error(400, str(e))
+                        return
+                    except Exception as e:
+                        self.send_error(500, f"Could not save LLM configuration: {e}")
+                        return
+                    self._send_json(result)
+
+                def _handle_inject_command(self) -> None:
+                    payload = self._read_json_body()
+                    if payload is None:
                         return
 
                     command = str(payload.get("command") or "").strip()
@@ -400,7 +474,7 @@ INDEX_HTML = """<!doctype html>
       gap: 8px;
       padding: 14px;
     }
-    input {
+    input, select {
       width: 100%;
       min-height: 38px;
       border: 1px solid var(--border);
@@ -411,7 +485,7 @@ INDEX_HTML = """<!doctype html>
       font: inherit;
       outline: none;
     }
-    input:focus {
+    input:focus, select:focus {
       border-color: var(--accent);
     }
     button {
@@ -463,6 +537,33 @@ INDEX_HTML = """<!doctype html>
       font-size: 12px;
       text-align: right;
     }
+    .config-controls {
+      display: grid;
+      grid-template-columns: minmax(150px, 220px) minmax(200px, 1fr) auto;
+      gap: 10px;
+      align-items: end;
+      padding: 14px;
+    }
+    .field {
+      display: grid;
+      gap: 5px;
+    }
+    label {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 650;
+    }
+    .config-message {
+      grid-column: 1 / -1;
+      min-height: 18px;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+    }
+    @media (max-width: 720px) {
+      .config-controls {
+        grid-template-columns: 1fr;
+      }
+    }
     textarea {
       display: block;
       width: 100%;
@@ -504,6 +605,18 @@ INDEX_HTML = """<!doctype html>
     <section>
       <details>
         <summary>Config</summary>
+        <div class="config-controls">
+          <div class="field">
+            <label for="llm-provider">Provider</label>
+            <select id="llm-provider"></select>
+          </div>
+          <div class="field">
+            <label for="llm-model">LLM</label>
+            <select id="llm-model"></select>
+          </div>
+          <button id="llm-save" type="button">Save</button>
+          <div class="config-message" id="llm-message"></div>
+        </div>
         <textarea id="config" readonly spellcheck="false"></textarea>
       </details>
     </section>
@@ -529,6 +642,12 @@ INDEX_HTML = """<!doctype html>
     const injectForm = document.querySelector("#inject-form");
     const injectCommand = document.querySelector("#inject-command");
     const injectSubmit = document.querySelector("#inject-submit");
+    const llmProvider = document.querySelector("#llm-provider");
+    const llmModel = document.querySelector("#llm-model");
+    const llmSave = document.querySelector("#llm-save");
+    const llmMessage = document.querySelector("#llm-message");
+    let llmControlsInitialized = false;
+    let llmOptionsLoading = false;
 
     function ledClass(status) {
       const value = String(status || "unknown").toLowerCase();
@@ -546,6 +665,74 @@ INDEX_HTML = """<!doctype html>
       </div>`;
     }
 
+    function option(label, value, disabled, selected) {
+      const opt = document.createElement("option");
+      opt.textContent = label;
+      opt.value = value;
+      opt.disabled = Boolean(disabled);
+      opt.selected = Boolean(selected);
+      return opt;
+    }
+
+    async function loadLlmOptions(provider, preferredModel) {
+      if (llmOptionsLoading) return;
+      llmOptionsLoading = true;
+      llmProvider.disabled = true;
+      llmModel.disabled = true;
+      llmSave.disabled = true;
+      llmMessage.textContent = "Loading LLM options...";
+      try {
+        const suffix = provider ? `?provider=${encodeURIComponent(provider)}` : "";
+        const response = await fetch(`/api/llm-options${suffix}`, { cache: "no-store" });
+        if (!response.ok) throw new Error(await response.text());
+        const data = await response.json();
+
+        const selectedProvider = data.provider || provider || "";
+        llmProvider.replaceChildren();
+        for (const item of data.providers || []) {
+          const label = item.available === false && item.reason
+            ? `${item.label || item.id} (${item.reason})`
+            : (item.label || item.id);
+          llmProvider.appendChild(option(label, item.id, item.available === false, item.id === selectedProvider));
+        }
+        if (selectedProvider && llmProvider.value !== selectedProvider) {
+          llmProvider.value = selectedProvider;
+        }
+
+        llmModel.replaceChildren();
+        const selectedModel = preferredModel || data.selected_model || "";
+        const models = data.models || [];
+        if (models.length === 0) {
+          llmModel.appendChild(option("No model available", "", true, true));
+        } else {
+          for (const model of models) {
+            llmModel.appendChild(option(model.label || model.id, model.id, false, model.id === selectedModel));
+          }
+          if (selectedModel && !models.some((model) => model.id === selectedModel)) {
+            llmModel.appendChild(option(`${selectedModel} (current)`, selectedModel, false, true));
+          }
+        }
+
+        llmMessage.textContent = data.message || "";
+      } catch (error) {
+        llmMessage.textContent = `LLM options unavailable: ${error}`;
+      } finally {
+        llmProvider.disabled = false;
+        llmModel.disabled = llmModel.options.length === 0 || !llmModel.value;
+        llmSave.disabled = !llmProvider.value || !llmModel.value;
+        llmOptionsLoading = false;
+      }
+    }
+
+    function syncLlmControls(data) {
+      if (llmControlsInitialized) return;
+      const env = (data.config && data.config.env) || {};
+      const provider = String(env.LLM_PROVIDER || "openai").toLowerCase();
+      const model = String(env.OPENAI_MODEL || "");
+      llmControlsInitialized = true;
+      loadLlmOptions(provider, model);
+    }
+
     async function refresh() {
       try {
         const response = await fetch("/api/snapshot", { cache: "no-store" });
@@ -558,6 +745,7 @@ INDEX_HTML = """<!doctype html>
         ];
         stateEl.innerHTML = rows.join("");
         configEl.value = data.config_text || "";
+        syncLlmControls(data);
         promptEl.value = data.prompt || "";
         const shouldStick = logsEl.scrollTop + logsEl.clientHeight >= logsEl.scrollHeight - 8;
         logsEl.value = data.logs || "";
@@ -592,6 +780,34 @@ INDEX_HTML = """<!doctype html>
       } finally {
         injectSubmit.disabled = false;
         injectCommand.focus();
+      }
+    });
+
+    llmProvider.addEventListener("change", () => {
+      loadLlmOptions(llmProvider.value, "");
+    });
+
+    llmSave.addEventListener("click", async () => {
+      const provider = llmProvider.value;
+      const model = llmModel.value;
+      if (!provider || !model) return;
+
+      llmSave.disabled = true;
+      llmMessage.textContent = "Saving...";
+      try {
+        const response = await fetch("/api/llm-config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ provider, model })
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const data = await response.json();
+        llmMessage.textContent = data.message || "Saved.";
+        await refresh();
+      } catch (error) {
+        llmMessage.textContent = `Save failed: ${error}`;
+      } finally {
+        llmSave.disabled = !llmProvider.value || !llmModel.value;
       }
     });
   </script>

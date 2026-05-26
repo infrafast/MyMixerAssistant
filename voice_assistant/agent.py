@@ -19,6 +19,9 @@ import socket
 import sys
 import tempfile
 import threading
+from typing import Any
+import urllib.error
+import urllib.request
 import wave
 
 import numpy as np
@@ -1226,6 +1229,178 @@ async def main():
 
         return secret or None
 
+    def load_mcp_config_from_values(values: dict) -> dict | None:
+        mcp_config_path = (values.get("MCP_CONFIG") or "").strip()
+        if not mcp_config_path:
+            return None
+        try:
+            with open(mcp_config_path) as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def update_env_file_values(env_file: Path, updates: dict[str, str]) -> None:
+        """Update or append KEY=value pairs in an env file while preserving other lines."""
+        try:
+            lines = env_file.read_text().splitlines(keepends=True)
+        except OSError as e:
+            raise ValueError(f"could not read env file '{env_file}': {e}") from e
+
+        remaining = dict(updates)
+        updated_lines = []
+        for line in lines:
+            stripped = line.lstrip()
+            if not stripped or stripped.startswith("#") or "=" not in line:
+                updated_lines.append(line)
+                continue
+
+            key = line.split("=", 1)[0].strip()
+            if key in remaining:
+                newline = "\n" if line.endswith("\n") else ""
+                updated_lines.append(f"{key}={remaining.pop(key)}{newline}")
+            else:
+                updated_lines.append(line)
+
+        if remaining:
+            if updated_lines and not updated_lines[-1].endswith("\n"):
+                updated_lines[-1] += "\n"
+            for key, value in remaining.items():
+                updated_lines.append(f"{key}={value}\n")
+
+        try:
+            env_file.write_text("".join(updated_lines))
+        except OSError as e:
+            raise ValueError(f"could not write env file '{env_file}': {e}") from e
+
+    def list_openai_models(values: dict) -> tuple[list[dict[str, str]], str | None]:
+        if not check_internet_connection():
+            return [], "internet offline"
+
+        api_key = read_secret_from_env_values(values, "OPENAI_API_KEY")
+        if not api_key:
+            return [], "missing OPENAI_API_KEY_FILE"
+
+        try:
+            client = openai.OpenAI(api_key=api_key)
+            response = client.models.list()
+        except Exception as e:
+            return [], f"OpenAI API unavailable: {e}"
+
+        model_ids = sorted(
+            {
+                model.id
+                for model in response.data
+                if model.id.startswith(("gpt-", "o1", "o3", "o4"))
+                and not any(marker in model.id for marker in ("audio", "transcribe", "tts", "image", "realtime"))
+            }
+        )
+        return [{"id": model_id, "label": model_id} for model_id in model_ids], None
+
+    def list_ollama_models(values: dict) -> tuple[list[dict[str, str]], str | None]:
+        base_url = (values.get("OLLAMA_BASE_URL") or "http://localhost:11434").strip().rstrip("/")
+        try:
+            with urllib.request.urlopen(f"{base_url}/api/tags", timeout=2.0) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as e:
+            return [], f"Ollama unavailable at {base_url}: {e}"
+
+        names = sorted(
+            model.get("name")
+            for model in payload.get("models", [])
+            if isinstance(model, dict) and model.get("name")
+        )
+        return [{"id": name, "label": name} for name in names], None
+
+    def build_llm_options(env_file: Path, requested_provider: str | None = None) -> dict[str, Any]:
+        values = dict(dotenv_values(env_file))
+        current_provider = (values.get("LLM_PROVIDER") or "openai").strip().lower()
+        provider = (requested_provider or current_provider or "openai").strip().lower()
+        current_model = (values.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
+        internet_online = check_internet_connection()
+
+        provider_entries = [
+            {
+                "id": "openai",
+                "label": "OpenAI",
+                "available": internet_online,
+                "reason": None if internet_online else "offline",
+            },
+            {"id": "ollama", "label": "Ollama", "available": True, "reason": None},
+        ]
+
+        if provider not in {"openai", "ollama"}:
+            provider = "openai" if internet_online else "ollama"
+
+        if provider == "openai":
+            models, reason = list_openai_models(values)
+        else:
+            models, reason = list_ollama_models(values)
+
+        message = ""
+        if reason:
+            message = reason
+        elif provider == "openai":
+            message = "OpenAI models loaded from API."
+        elif provider == "ollama":
+            message = "Ollama local models loaded."
+
+        return {
+            "provider": provider,
+            "providers": provider_entries,
+            "models": models,
+            "selected_model": current_model if provider == current_provider else "",
+            "message": message,
+        }
+
+    def save_llm_config(
+        env_file: Path,
+        provider: str,
+        model: str,
+        web_monitor: WebMonitor | None,
+        reload_event: threading.Event | None,
+    ) -> dict[str, Any]:
+        provider = provider.strip().lower()
+        model = model.strip()
+        if provider not in {"openai", "ollama"}:
+            raise ValueError(f"unsupported LLM provider: {provider}")
+        if provider == "openai" and not check_internet_connection():
+            raise ValueError("OpenAI cannot be selected while internet is offline")
+        if not model:
+            raise ValueError("LLM model is required")
+
+        values = dict(dotenv_values(env_file))
+        available_models, reason = (list_openai_models(values) if provider == "openai" else list_ollama_models(values))
+        if reason:
+            raise ValueError(reason)
+        if available_models and model not in {item["id"] for item in available_models}:
+            raise ValueError(f"model '{model}' is not available for provider '{provider}'")
+
+        update_env_file_values(env_file, {"LLM_PROVIDER": provider, "OPENAI_MODEL": model})
+        values = dict(dotenv_values(env_file))
+        mcp_config = load_mcp_config_from_values(values)
+        if web_monitor:
+            web_monitor.update(
+                env_values=values,
+                mcp_config=mcp_config or {},
+                services=build_service_state(
+                    llm_provider=provider,
+                    model=model,
+                    stt_provider=(values.get("STT_PROVIDER") or "openai-whisper").strip().lower(),
+                    tts_provider=(values.get("TTS_PROVIDER") or "elevenlabs").strip().lower(),
+                    mcp_config=mcp_config,
+                ),
+            )
+
+        if reload_event:
+            reload_event.set()
+
+        return {
+            "saved": True,
+            "provider": provider,
+            "model": model,
+            "message": "LLM configuration saved. Restarting assistant with the new model.",
+        }
+
     def clear_env_keys(env_files: list[Path]) -> None:
         """Clear keys owned by env profiles so auto reloads do not keep stale values."""
         env_keys = set()
@@ -1395,6 +1570,7 @@ async def main():
         print(f"Error: WEB_MONITOR_PORT must be an integer, got: {profile_values.get('WEB_MONITOR_PORT')}")
         sys.exit(1)
 
+    reload_event = threading.Event()
     web_monitor = None
     if web_enabled:
         web_monitor = WebMonitor()
@@ -1407,20 +1583,37 @@ async def main():
             web_monitor = None
             print(f"Web monitor disabled: could not bind {web_host}:{web_port}: {e}")
 
+    if web_monitor:
+        web_monitor.set_llm_config_handlers(
+            options_handler=lambda provider=None: build_llm_options(env_file, provider),
+            save_handler=lambda provider, model: save_llm_config(env_file, provider, model, web_monitor, reload_event),
+        )
+
     if auto_selection_message:
         print(auto_selection_message)
 
     if not auto_env_mode:
-        assistant = build_assistant_from_env(env_file, web_monitor=web_monitor)
         try:
-            await assistant.run()
+            announce_reload_complete = False
+            while True:
+                reload_event.clear()
+                assistant = build_assistant_from_env(env_file, reload_event=reload_event, web_monitor=web_monitor)
+                if announce_reload_complete:
+                    await assistant.text_to_speech("Configuration mise à jour. L'assistant redémarre avec le nouveau modèle.")
+                    announce_reload_complete = False
+
+                run_result = await assistant.run()
+                if run_result != "reload":
+                    break
+
+                print(f"Configuration reload requested. Restarting assistant with {env_file}.")
+                announce_reload_complete = True
         finally:
             if web_monitor:
                 web_monitor.stop()
                 web_monitor.restore_console_capture()
         return
 
-    reload_event = threading.Event()
     auto_monitor = AutoNetworkMonitor(
         initial_online=internet_online,
         dotenv_values_func=dotenv_values,
