@@ -510,15 +510,7 @@ TTS_PROVIDER=pyttsx3
 MCP_CONFIG=mcp_servers.offline.json
 ```
 
-compatibles models for an imac 24Gb could be:
-- qwen3:8b (ou tag équivalent disponible dans ta lib Ollama) Bon compromis qualité/vitesse pour agent outillé.
-- llama3.1:8b Très stable, largement utilisé, bon fallback.
-- mistral-nemo:12b Plus lourd, mais souvent meilleur en raisonnement/instructions.
-- command-r-plus (si tu acceptes plus de latence/ressources) Très bon en usage “tools/RAG”, mais plus coûteux localement.
-
-
 When `LLM_PROVIDER=ollama`, the app stays on Ollama. Start `ollama serve` and pull the selected model before running the assistant.
-
 
 ### Changing Voice Settings
 
@@ -535,16 +527,6 @@ assistant = VoiceAssistant(
     model="gpt-3.5-turbo"  # Faster model
 )
 ```
-
-### Evolutions
-
-1. introduce a "thinking" looping sound which is played between the user prompt and until the TTS reply to the user so he has a semantic feedback that his request is being processed
-2. add a web page to configure all the environement variables
-3. Continue the `--env-file auto` work. Phase 1 and phase 2 are implemented: startup chooses `.env.online` or `.env.offline`, network monitoring announces `Internet live` or `Internet inactive` with the TTS configured by the newly detected profile, then the assistant restarts with the new profile so TTS/STT/LLM/MCP are rebuilt from the selected env file. Future improvements could add configurable connectivity endpoints, debounce settings, and a smoother handoff for long-running requests.
-4. 
-
-1. **No Audio Input Detected**
-
 
 ## Troubleshooting
 
