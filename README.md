@@ -58,8 +58,8 @@ It is more specifically design for assisting live musician that gives commands t
 │   Input     │     │ Text (STT)   │     │  MCPAgent   │     │ Speech (TTS) │
 └─────────────┘     └──────────────┘     └─────────────┘     └──────────────┘
                      Whisper             OpenAI  │                ElevenLabs
-                     API or local      or local  |
-                                        (Ollama) │                or pyttsx3
+                     API or local      or local  |                or pyttsx3
+                                        (Ollama) │                
                                                  │
                                           ┌──────▼────────┐
                                           │ MCP Servers   │
