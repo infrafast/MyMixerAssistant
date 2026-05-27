@@ -287,13 +287,13 @@ The assistant loads MCP server configurations indicated in your environement fil
 
 - **playwright**: Web automation and browser control
 - **linear**: Task and project management
-- **XMSeries-MCP**: control of a Behringer digital mixer  (see https://github.com/infrafast/XMSeries-MCP)
+- **mixer**: control of a Behringer digital mixer  (see https://github.com/infrafast/XMSeries-MCP)
 
 For offline mode, use `mcp_servers.offline.json`:
 
 - **filesystem**: local filesystem access inside the configured root
 - **memory**: local MCP memory server
-- **XMSeries-MCP**: control of a Behringer digital mixer  (see https://github.com/infrafast/XMSeries-MCP)
+- **mixer**: control of a Behringer digital mixer  (see https://github.com/infrafast/XMSeries-MCP)
 
 Set `MCP_CONFIG=mcp_servers.offline.json` in the selected env file.
 
