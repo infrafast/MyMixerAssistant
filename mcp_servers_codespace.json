@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "mixer": {
+      "type": "streamable-http",
+      "url": "https://effective-zebra-r7xw954qw925pwp-8787.app.github.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer change-me"
+      },
+      "assistantPrompt": {
+        "promptName": "xmseries_mixer_assistant",
+        "resourceUri": "xmseries://prompt/system",
+        "tool": "osc_get_agent_prompt"
+      }
+    }
+  }
+}
