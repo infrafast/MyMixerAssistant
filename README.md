@@ -36,6 +36,8 @@
 This is a voice-enabled AI personal assistant that leverages the Model Context Protocol (MCP) to integrate multiple tools and services through natural voice interactions.
 It is more specifically design for assisting live musician that gives commands to drive a digital mixer, a DMX console or other on stage equipment.
 
+For developpers: https://deepwiki.com/infrafast/LiveStageAssistant
+
 ## Features
 
 - 🎤 **Voice Input**: Real-time speech-to-text using OpenAI Whisper API or local Whisper
