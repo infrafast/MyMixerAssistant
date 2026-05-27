@@ -199,14 +199,14 @@ The assistant treats current external state as time-sensitive. Conversation memo
 
 ### Wake Word
 
-`WAKE_WORD` is optional. When it is empty, the assistant keeps the current behavior and processes every successful transcription. When it is set, spoken transcriptions are processed only if the wake word appears at the start of the phrase or very close to it.
+`WAKE_WORD` is optional. When it is empty, the assistant processes every successful transcription. When it is set, spoken transcriptions are processed only if the wake word appears at the start of the phrase or very close to it.
 
 For example, with `WAKE_WORD=Mixeur`, all of these are accepted and the command text after the wake word is sent to the agent:
 
 ```text
-Mixeur, monte le volume
-Salut Mixeur, monte le volume
-Dis Mixeur, monte le volume
+Mixeur, increase volume
+Hi Mixeur, increase volume
+Wakeup Mixeur, increase volume
 ```
 
 If multiple variants are needed, separate them with a comma, semicolon, or pipe:
