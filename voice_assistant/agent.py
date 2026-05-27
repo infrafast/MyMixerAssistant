@@ -470,40 +470,40 @@ class VoiceAssistant:
 
         return config
 
-    def _disabled_mcp_server_names(self) -> set[str]:
-        raw_value = os.getenv("MCP_DISABLED_SERVERS", "")
-        return {name.strip() for name in raw_value.replace(";", ",").split(",") if name.strip()}
-
     def _filter_unavailable_mcp_servers(self, config: dict) -> dict:
-        """Drop MCP servers that are explicitly disabled or cannot be started locally."""
+        """Drop MCP servers that cannot be started locally."""
         server_configs = config.get("mcpServers")
         if not isinstance(server_configs, dict):
             return config
 
         filtered_config = dict(config)
         filtered_servers = {}
-        disabled_servers = self._disabled_mcp_server_names()
 
         for server_name, server_config in server_configs.items():
-            if server_name in disabled_servers:
-                print(f"Skipping disabled MCP server '{server_name}'.")
-                continue
-
             command = server_config.get("command") if isinstance(server_config, dict) else None
             args = server_config.get("args", []) if isinstance(server_config, dict) else []
 
             if command and shutil.which(command) is None:
-                print(f"Skipping MCP server '{server_name}' because command '{command}' was not found.")
+                print(
+                    f"Could not start MCP server instance '{server_name}': "
+                    f"command '{command}' was not found."
+                )
                 continue
 
             if command == "node":
                 script_arg = args[0].strip() if args and isinstance(args[0], str) else ""
                 if not script_arg:
-                    print(f"Skipping MCP server '{server_name}' because its node script path is empty.")
+                    print(
+                        f"Could not start MCP server instance '{server_name}': "
+                        "node script path is empty."
+                    )
                     continue
                 script_path = Path(script_arg).expanduser()
                 if not script_path.exists():
-                    print(f"Skipping MCP server '{server_name}' because node script was not found: {script_path}")
+                    print(
+                        f"Could not start MCP server instance '{server_name}': "
+                        f"node script was not found: {script_path}"
+                    )
                     continue
 
             filtered_servers[server_name] = server_config

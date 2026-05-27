@@ -186,8 +186,6 @@ WAKE_WORD=                                      # Empty keeps current behavior; 
 ASSISTANT_SYSTEM_PROMPT="You are a helpful voice assistant..."  # Customize personality
 MCP_AGENT_MEMORY_ENABLED=true                  # Keep conversational memory; live external state still requires MCP reads
 MCP_CONFIG=mcp_servers.offline.json             # Optional config override
-MIXER_MCP_SERVER_PATH=                          # Path to XMSeries-MCP/dist/index.js when mixer control is enabled
-MCP_DISABLED_SERVERS=                           # Comma-separated MCP server names to skip, e.g. mixer
 
 # Optional - MCP-provided Assistant Instructions
 MCP_LOAD_SERVER_PROMPT=false                    # true | false, default false
@@ -285,8 +283,6 @@ ollama serve
 ollama pull qwen3:8b
 ```
 
-If you do not have a local `XMSeries-MCP` checkout available yet, leave `MIXER_MCP_SERVER_PATH` empty or set `MCP_DISABLED_SERVERS=mixer`. The assistant will skip the mixer MCP server instead of failing startup.
-
 ### MCP Server Configuration
 
 The assistant loads MCP server configurations indicated in your environment file (see Online and Offline Profiles and Environment Variables) in the project root. By default, it includes:
@@ -303,20 +299,7 @@ For offline mode, use `mcp_servers.offline.json`:
 
 Set `MCP_CONFIG=mcp_servers.offline.json` in the selected env file.
 
-The included mixer configuration is portable and expects its Node entrypoint from the selected env file:
-
-```bash
-MIXER_MCP_SERVER_PATH=/absolute/path/to/XMSeries-MCP/dist/index.js
-```
-
-If `MIXER_MCP_SERVER_PATH` is empty, points to a missing file, or `node` is unavailable, the assistant logs a warning and skips that MCP server. You can also skip configured servers explicitly:
-
-```bash
-MCP_DISABLED_SERVERS=mixer
-MCP_DISABLED_SERVERS=mixer,memory
-```
-
-Skipping an MCP server also means any `assistantPrompt` instructions from that server cannot be loaded. The assistant keeps the local system prompt in that case.
+Server-specific paths belong in the selected MCP JSON file. For example, the `mixer` entry uses a Node script path for `XMSeries-MCP/dist/index.js`; update that path in `mcp_servers.json` or `mcp_servers.offline.json` to match your machine. If a configured command or Node script cannot be found, the assistant prints that the MCP server instance could not be started and continues with the remaining available servers.
 
 To add more servers, edit `mcp_servers.json` or copy `mcp_servers.example.json` which includes additional servers like:
 - filesystem, github, gitlab, google-drive, postgres, sqlite, slack, memory, puppeteer, brave-search, fetch
@@ -575,8 +558,8 @@ Nice voice ID:
    - Check internet connection for first-time npx downloads
    - Use `MCP_CONFIG=mcp_servers.offline.json` in the selected env file for local-only MCP servers
    - Verify API keys for specific servers
-   - For mixer control, set `MIXER_MCP_SERVER_PATH` to the real `XMSeries-MCP/dist/index.js` path
-   - If you do not need mixer control, set `MCP_DISABLED_SERVERS=mixer`
+   - For mixer control, set the `mixer` script path in the selected MCP JSON file to the real `XMSeries-MCP/dist/index.js` path
+   - If a configured command or script path is missing, the assistant reports that this MCP server instance could not be started and keeps running with the remaining servers
 
 4. **Thinking Sound Or Audio Output Unavailable**
    - If `pygame` cannot open an audio device, the assistant continues without the thinking sound
@@ -588,7 +571,7 @@ Nice voice ID:
    - Confirm the selected `MCP_CONFIG` file has at least one server with an `assistantPrompt` block
    - Confirm each `assistantPrompt` block defines at least one of `promptName`, `resourceUri`, or `tool`
    - Check the startup warnings for unsupported prompts/resources or a missing fallback tool
-   - If the prompt source belongs to a skipped server, such as `mixer`, set the missing path or remove that server from `MCP_DISABLED_SERVERS`
+   - If the prompt source belongs to a server instance that could not start, such as `mixer`, fix that server's command or script path in the selected MCP JSON file
    - Use `MCP_PROMPT_MERGE_MODE=append` when you want to keep the local voice and TTS constraints
 
 6. **High Latency**
