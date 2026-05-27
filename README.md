@@ -253,8 +253,9 @@ python voice_assistant/agent.py --env-file .env.online
 # Offline/local profile
 python voice_assistant/agent.py --env-file .env.offline
 ```
-
-If you run `python voice_assistant/agent.py` without `--env-file`, it loads `.env`.
+# auto : switch to/from online to offline setting depending according to internet connectivity
+python voice_assistant/agent.py --env-file auto
+```
 
 Before using the online profile, create local secret files at the repository root. They are ignored by Git:
 
