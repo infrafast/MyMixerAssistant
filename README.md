@@ -243,6 +243,7 @@ The repository includes two ready-to-use environment profiles:
 
 - `.env.online`: cloud mode with OpenAI for LLM/STT, ElevenLabs for TTS, and `mcp_servers.json`
 - `.env.offline`: local mode with Ollama for LLM, local Whisper for STT, pyttsx3 for TTS, and `mcp_servers.offline.json`
+- `auto`: switch to/from online to offline setting depending according to internet connectivity
 
 Start the assistant by passing the profile you want:
 
@@ -253,7 +254,7 @@ python voice_assistant/agent.py --env-file .env.online
 # Offline/local profile
 python voice_assistant/agent.py --env-file .env.offline
 
-# auto : switch to/from online to offline setting depending according to internet connectivity
+# auto
 python voice_assistant/agent.py --env-file auto
 ```
 
