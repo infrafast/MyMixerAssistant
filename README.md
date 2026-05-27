@@ -227,7 +227,7 @@ The monitor exposes:
 
 - **State**: current online/offline status, selected env profile, and LLM/STT/TTS/MCP status indicators
 - **Inject Command**: a text input that queues a command for the agent
-- **Config**: read-only active env and MCP JSON configuration with secrets redacted
+- **Config**: active env and MCP JSON configuration with secrets redacted and possibility to change LLM provider on the fly
 - **Console Log**: the same Python console output mirrored into the page
 - **Prompt**: the final system prompt after local and MCP-provided prompt merge
 
