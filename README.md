@@ -60,13 +60,14 @@ It is more specifically design for assisting live musician that gives commands t
                          Whisper                 │                ElevenLabs
                     API or local                 │                or pyttsx3
                                                  │
-                                          ┌──────▼──────┐
-                                          │ MCP Servers │
-                                          ├─────────────┤
-                                          │ • Linear    │
-                                          │ • Playwright│
-                                          │ • Filesystem│
-                                          └─────────────┘
+                                          ┌──────▼────────┐
+                                          │ MCP Servers   │
+                                          ├───────────────┤
+                                          │ • Linear      │
+                                          │ • Playwright  │
+                                          │ • Filesystem  │
+                                          │ • XMSeries-MCP│
+                                          └───────────────┘
 ```
 
 ## Installation
