@@ -252,7 +252,7 @@ python voice_assistant/agent.py --env-file .env.online
 
 # Offline/local profile
 python voice_assistant/agent.py --env-file .env.offline
-```
+
 # auto : switch to/from online to offline setting depending according to internet connectivity
 python voice_assistant/agent.py --env-file auto
 ```
