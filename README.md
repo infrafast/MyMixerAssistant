@@ -283,7 +283,7 @@ ollama pull qwen3:8b
 
 ### MCP Server Configuration
 
-The assistant loads MCP server configurations from `mcp_servers.json` in the project root. By default, it includes:
+The assistant loads MCP server configurations indicated in your environement file (see Online and Offline Profiles and Environment Variables) in the project root. By default, it includes:
 
 - **playwright**: Web automation and browser control
 - **linear**: Task and project management
