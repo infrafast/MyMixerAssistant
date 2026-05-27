@@ -455,41 +455,6 @@ With `--env-file auto`, the assistant checks internet connectivity at startup. I
 
 After the announcement, the current voice loop is interrupted if needed, the active assistant instance is cleaned up, and a fresh instance is started from the newly detected env file. This reloads the TTS, STT, LLM, and MCP configuration from the selected profile. Any command currently being recorded or processed may be cancelled during the switch, which keeps the implementation simple and avoids mixing services from two profiles. Once the new assistant is ready, it announces that the environment was updated and the in-flight request was cancelled using the TTS from the new profile.
 
-
-Si tu lances simplement : python voice_assistant/agent.py
-
-le fichier chargé par défaut est `.env`. Si `.env` n'existe pas, les valeurs par défaut internes sont :
-
-LLM_PROVIDER=openai
-OPENAI_MODEL=gpt-4o-mini
-OLLAMA_BASE_URL=http://localhost:11434
-
-STT_PROVIDER=openai-whisper
-LOCAL_WHISPER_MODEL=base
-STT_LANGUAGE=auto
-
-TTS_PROVIDER=elevenlabs
-ELEVENLABS_VOICE_ID=1EmYoP3UnnnwhlJKovEy
-
-VOICE_SILENCE_THRESHOLD=500
-VOICE_SILENCE_DURATION=1.5
-THINKING_SOUND_FILE=thinking.wav
-
-MCP_CONFIG non défini, donc `mcp_servers.json` est utilisé si présent
-MCP_LOAD_SERVER_PROMPT=false
-MCP_PROMPT_MERGE_MODE=append
-
-Donc, par défaut, il utilise :
-LLM : OpenAI avec gpt-4o-mini
-STT : Whisper via l’API OpenAI
-TTS : ElevenLabs si ELEVENLABS_API_KEY existe, sinon fallback pyttsx3
-MCP config : mcp_servers.json, donc actuellement playwright + linear
-Prompt MCP au démarrage : désactivé, donc seul le prompt local est utilisé
-Langue transcription : auto-detection
-Voix ElevenLabs : 1EmYoP3UnnnwhlJKovEy
-Important : sans paramètres, OPENAI_API_KEY est obligatoire, parce que le LLM par défaut est OpenAI et le STT par défaut est aussi OpenAI Whisper.
-
-
 ### Changing Model Provider
 
 The voice assistant supports OpenAI and Ollama through LangChain. Any selected model must support tool calling.
