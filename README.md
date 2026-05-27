@@ -528,6 +528,9 @@ assistant = VoiceAssistant(
 )
 ```
 
+Nice voice ID:
+- french: kENkNtk0xyzG09WW40xE
+
 ## Troubleshooting
 
 ### Common Issues
