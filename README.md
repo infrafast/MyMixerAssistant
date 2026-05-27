@@ -186,6 +186,8 @@ WAKE_WORD=                                      # Empty keeps current behavior; 
 ASSISTANT_SYSTEM_PROMPT="You are a helpful voice assistant..."  # Customize personality
 MCP_AGENT_MEMORY_ENABLED=true                  # Keep conversational memory; live external state still requires MCP reads
 MCP_CONFIG=mcp_servers.offline.json             # Optional config override
+MIXER_MCP_SERVER_PATH=                          # Path to XMSeries-MCP/dist/index.js when mixer control is enabled
+MCP_DISABLED_SERVERS=                           # Comma-separated MCP server names to skip, e.g. mixer
 
 # Optional - MCP-provided Assistant Instructions
 MCP_LOAD_SERVER_PROMPT=false                    # true | false, default false
@@ -283,9 +285,11 @@ ollama serve
 ollama pull qwen3:8b
 ```
 
+If you do not have a local `XMSeries-MCP` checkout available yet, leave `MIXER_MCP_SERVER_PATH` empty or set `MCP_DISABLED_SERVERS=mixer`. The assistant will skip the mixer MCP server instead of failing startup.
+
 ### MCP Server Configuration
 
-The assistant loads MCP server configurations indicated in your environement file (see Online and Offline Profiles and Environment Variables) in the project root. By default, it includes:
+The assistant loads MCP server configurations indicated in your environment file (see Online and Offline Profiles and Environment Variables) in the project root. By default, it includes:
 
 - **playwright**: Web automation and browser control
 - **linear**: Task and project management
@@ -298,6 +302,21 @@ For offline mode, use `mcp_servers.offline.json`:
 - **mixer**: control of a Behringer digital mixer  (see https://github.com/infrafast/XMSeries-MCP)
 
 Set `MCP_CONFIG=mcp_servers.offline.json` in the selected env file.
+
+The included mixer configuration is portable and expects its Node entrypoint from the selected env file:
+
+```bash
+MIXER_MCP_SERVER_PATH=/absolute/path/to/XMSeries-MCP/dist/index.js
+```
+
+If `MIXER_MCP_SERVER_PATH` is empty, points to a missing file, or `node` is unavailable, the assistant logs a warning and skips that MCP server. You can also skip configured servers explicitly:
+
+```bash
+MCP_DISABLED_SERVERS=mixer
+MCP_DISABLED_SERVERS=mixer,memory
+```
+
+Skipping an MCP server also means any `assistantPrompt` instructions from that server cannot be loaded. The assistant keeps the local system prompt in that case.
 
 To add more servers, edit `mcp_servers.json` or copy `mcp_servers.example.json` which includes additional servers like:
 - filesystem, github, gitlab, google-drive, postgres, sqlite, slack, memory, puppeteer, brave-search, fetch
@@ -541,32 +560,43 @@ Nice voice ID:
    - Check microphone permissions
    - Lower the `silence_threshold` value
    - Verify PyAudio: `python -c "import pyaudio; pyaudio.PyAudio()"`
+   - If no default input device is available, the assistant falls back to text commands instead of retrying microphone capture in a tight loop
+   - With the web monitor enabled, use the **Inject Command** field; without it, type commands in the terminal prompt
 
 2. **TTS Not Working**
    - Verify API keys are set correctly
    - Check API quotas
    - Use `TTS_PROVIDER=pyttsx3` in the selected env file for fully local TTS
    - System will fall back to pyttsx3 if ElevenLabs fails
+   - In headless environments without ALSA, `ffplay`, or `aplay`, spoken output is skipped without noisy playback errors. Use `TTS_PROVIDER=none` to make silent mode explicit.
 
 3. **MCP Server Connection Issues**
    - Ensure Node.js is installed
    - Check internet connection for first-time npx downloads
    - Use `MCP_CONFIG=mcp_servers.offline.json` in the selected env file for local-only MCP servers
    - Verify API keys for specific servers
+   - For mixer control, set `MIXER_MCP_SERVER_PATH` to the real `XMSeries-MCP/dist/index.js` path
+   - If you do not need mixer control, set `MCP_DISABLED_SERVERS=mixer`
 
-4. **MCP Startup Instructions Not Loaded**
+4. **Thinking Sound Or Audio Output Unavailable**
+   - If `pygame` cannot open an audio device, the assistant continues without the thinking sound
+   - Set `THINKING_SOUND_FILE=` to leave the thinking sound unset
+   - Install an audio backend such as `ffmpeg` or `alsa-utils` only if you need local audio playback
+
+5. **MCP Startup Instructions Not Loaded**
    - Confirm `MCP_LOAD_SERVER_PROMPT=true` in the selected env file
    - Confirm the selected `MCP_CONFIG` file has at least one server with an `assistantPrompt` block
    - Confirm each `assistantPrompt` block defines at least one of `promptName`, `resourceUri`, or `tool`
    - Check the startup warnings for unsupported prompts/resources or a missing fallback tool
+   - If the prompt source belongs to a skipped server, such as `mixer`, set the missing path or remove that server from `MCP_DISABLED_SERVERS`
    - Use `MCP_PROMPT_MERGE_MODE=append` when you want to keep the local voice and TTS constraints
 
-5. **High Latency**
+6. **High Latency**
    - Use faster LLM model (e.g., `gpt-3.5-turbo`)
    - Reduce `max_steps` in MCPAgent
    - Consider using local models
 
-6. **Offline Mode Still Tries to Connect**
+7. **Offline Mode Still Tries to Connect**
    - Confirm you started with `python voice_assistant/agent.py --env-file .env.offline`
    - Confirm the selected env file includes `LLM_PROVIDER=ollama`
    - Confirm the selected env file includes `STT_PROVIDER=local-whisper`
@@ -574,7 +604,7 @@ Nice voice ID:
    - Confirm the selected env file includes `MCP_CONFIG=mcp_servers.offline.json`
    - Ensure the Ollama model, faster-whisper model, and MCP npm packages were cached before disconnecting
 
-7. **Auto Mode Selected The Wrong Profile**
+8. **Auto Mode Selected The Wrong Profile**
    - Start with `python voice_assistant/agent.py --env-file auto`
    - Auto mode checks a short TCP connection to `api.openai.com:443`
    - If that host is blocked by your network, auto mode may select `.env.offline`

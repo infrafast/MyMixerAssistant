@@ -15,6 +15,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import shutil
 import socket
 import sys
 import tempfile
@@ -129,6 +130,18 @@ def read_secret_from_env_values(values: dict, name: str) -> str | None:
     return secret or None
 
 
+def elevenlabs_playback_available() -> bool:
+    """Return whether elevenlabs.play can play generated audio locally."""
+    return shutil.which("ffplay") is not None
+
+
+def local_tts_playback_available() -> bool:
+    """Return whether pyttsx3 is likely to have a local audio player."""
+    if sys.platform.startswith("linux"):
+        return shutil.which("aplay") is not None
+    return True
+
+
 def speak_auto_network_status(text: str, env_file: Path, dotenv_values_func) -> None:
     """Speak a network status message with the TTS configured by the detected env file."""
     values = dotenv_values_func(env_file)
@@ -144,6 +157,8 @@ def speak_auto_network_status(text: str, env_file: Path, dotenv_values_func) -> 
             elevenlabs_api_key = read_secret_from_env_values(values, "ELEVENLABS_API_KEY")
             if elevenlabs_api_key:
                 try:
+                    if not elevenlabs_playback_available():
+                        return
                     client = ElevenLabs(api_key=elevenlabs_api_key)
                     audio = client.text_to_speech.convert(
                         text=text,
@@ -156,8 +171,13 @@ def speak_auto_network_status(text: str, env_file: Path, dotenv_values_func) -> 
                     play(audio)
                     return
                 except Exception as e:
-                    print(f"Auto network status ElevenLabs TTS failed: {e}")
+                    if local_tts_playback_available():
+                        print(f"Auto network status ElevenLabs TTS failed: {e}")
+                    else:
+                        return
 
+        if not local_tts_playback_available():
+            return
         try:
             TTS_ENGINE.say(text)
             TTS_ENGINE.runAndWait()
@@ -295,7 +315,12 @@ class VoiceAssistant:
 
         # Initialize audio components
         self.audio = pyaudio.PyAudio()
-        pygame.mixer.init()
+        self.pygame_mixer_available = False
+        try:
+            pygame.mixer.init()
+            self.pygame_mixer_available = True
+        except pygame.error as e:
+            print(f"Audio output unavailable for thinking sound; continuing without it: {e}")
 
         # Speech-to-text configuration
         self.openai_api_key = openai_api_key
@@ -325,7 +350,7 @@ class VoiceAssistant:
         self.thinking_sound_channel = None
         self.thinking_sound_warning_shown = False
         self.thinking_sound_lock = threading.Lock()
-        if self.thinking_sound_path:
+        if self.pygame_mixer_available and self.thinking_sound_path:
             try:
                 self.thinking_sound = pygame.mixer.Sound(str(self.thinking_sound_path))
             except pygame.error as e:
@@ -347,6 +372,8 @@ class VoiceAssistant:
         self.reload_event = reload_event
         self.web_monitor = web_monitor
         self.pending_injected_command: str | None = None
+        self.microphone_available = True
+        self.microphone_warning_shown = False
         
         #self.system_prompt = system_prompt or (
         #    "You are a helpful voice assistant with access to various tools. Your name is mcp-use "
@@ -396,6 +423,9 @@ class VoiceAssistant:
 
     def start_thinking_sound(self) -> None:
         """Loop the configured thinking sound until stop_thinking_sound is called."""
+        if not self.pygame_mixer_available:
+            return
+
         if not self.thinking_sound:
             if not self.thinking_sound_warning_shown:
                 print(
@@ -412,6 +442,9 @@ class VoiceAssistant:
 
     def stop_thinking_sound(self) -> None:
         """Stop the thinking sound if it is currently playing."""
+        if not self.pygame_mixer_available:
+            return
+
         with self.thinking_sound_lock:
             if self.thinking_sound_channel:
                 self.thinking_sound_channel.stop()
@@ -436,6 +469,47 @@ class VoiceAssistant:
             return config
 
         return config
+
+    def _disabled_mcp_server_names(self) -> set[str]:
+        raw_value = os.getenv("MCP_DISABLED_SERVERS", "")
+        return {name.strip() for name in raw_value.replace(";", ",").split(",") if name.strip()}
+
+    def _filter_unavailable_mcp_servers(self, config: dict) -> dict:
+        """Drop MCP servers that are explicitly disabled or cannot be started locally."""
+        server_configs = config.get("mcpServers")
+        if not isinstance(server_configs, dict):
+            return config
+
+        filtered_config = dict(config)
+        filtered_servers = {}
+        disabled_servers = self._disabled_mcp_server_names()
+
+        for server_name, server_config in server_configs.items():
+            if server_name in disabled_servers:
+                print(f"Skipping disabled MCP server '{server_name}'.")
+                continue
+
+            command = server_config.get("command") if isinstance(server_config, dict) else None
+            args = server_config.get("args", []) if isinstance(server_config, dict) else []
+
+            if command and shutil.which(command) is None:
+                print(f"Skipping MCP server '{server_name}' because command '{command}' was not found.")
+                continue
+
+            if command == "node":
+                script_arg = args[0].strip() if args and isinstance(args[0], str) else ""
+                if not script_arg:
+                    print(f"Skipping MCP server '{server_name}' because its node script path is empty.")
+                    continue
+                script_path = Path(script_arg).expanduser()
+                if not script_path.exists():
+                    print(f"Skipping MCP server '{server_name}' because node script was not found: {script_path}")
+                    continue
+
+            filtered_servers[server_name] = server_config
+
+        filtered_config["mcpServers"] = filtered_servers
+        return filtered_config
 
     def _build_llm(self):
         """Build the configured LLM."""
@@ -806,6 +880,7 @@ class VoiceAssistant:
 
         # Replace environment variable placeholders
         config = self._substitute_env_vars(config)
+        config = self._filter_unavailable_mcp_servers(config)
 
         try:
             # Create MCP client
@@ -851,8 +926,12 @@ class VoiceAssistant:
 
     def record_audio(self) -> bytes | None:
         """Record audio from microphone."""
+        if not self.microphone_available:
+            return None
+
         print("\nListening... (speak now)")
 
+        stream = None
         try:
             stream = self.audio.open(
                 format=self.audio_format,
@@ -911,7 +990,58 @@ class VoiceAssistant:
 
         except Exception as e:
             print(f"Error recording audio: {e}")
+            self._mark_microphone_unavailable(e)
             return None
+        finally:
+            if stream:
+                try:
+                    if stream.is_active():
+                        stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+
+    def _mark_microphone_unavailable(self, error: Exception) -> None:
+        """Switch to text fallback when the microphone cannot be opened."""
+        error_text = str(error)
+        permanent_markers = (
+            "Invalid input device",
+            "No Default Input Device Available",
+            "no default input device",
+            "Unknown PCM",
+        )
+        error_code = getattr(error, "errno", None)
+        if error_code != -9996 and not any(marker.lower() in error_text.lower() for marker in permanent_markers):
+            return
+
+        self.microphone_available = False
+        if self.web_monitor:
+            self.web_monitor.update(
+                services={"Audio input": {"status": "unavailable", "detail": error_text}}
+            )
+        if not self.microphone_warning_shown:
+            print("Microphone unavailable. Falling back to text commands.")
+            if self.web_monitor:
+                print("Use the web monitor Inject Command field to send commands.")
+            else:
+                print("Type commands in the terminal prompt.")
+            self.microphone_warning_shown = True
+
+    async def wait_for_text_fallback_command(self) -> str | None:
+        """Wait for a command when microphone input is unavailable."""
+        if self.web_monitor:
+            while True:
+                if self.reload_event and self.reload_event.is_set():
+                    return None
+                injected_command = self.web_monitor.pop_injected_command()
+                if injected_command:
+                    return injected_command
+                await asyncio.sleep(0.5)
+
+        try:
+            return (await asyncio.to_thread(input, "\nText command> ")).strip() or None
+        except EOFError:
+            return "exit"
 
     def _write_wav(self, audio_data: bytes, audio_file) -> None:
         """Write recorded audio bytes as a WAV file-like object."""
@@ -1002,6 +1132,8 @@ class VoiceAssistant:
 
         # Try ElevenLabs first
         if self.elevenlabs_client:
+            if not elevenlabs_playback_available():
+                return self.text_to_speech_pyttsx3(text)
             try:
                 # Generate audio using ElevenLabs
                 with TTS_LOCK:
@@ -1018,15 +1150,24 @@ class VoiceAssistant:
                     play(audio)
                 return True
             except Exception as e:
-                print(f"ElevenLabs TTS failed: {e}")
-                print("Falling back to local pyttsx3 TTS...")
+                if local_tts_playback_available():
+                    print(f"ElevenLabs TTS failed: {e}")
+                    print("Falling back to local pyttsx3 TTS...")
+                else:
+                    return False
         elif self.tts_provider == "elevenlabs":
-            print("ElevenLabs TTS selected but ELEVENLABS_API_KEY is missing. Falling back to pyttsx3...")
+            if local_tts_playback_available():
+                print("ElevenLabs TTS selected but ELEVENLABS_API_KEY is missing. Falling back to pyttsx3...")
+            else:
+                return False
 
         return self.text_to_speech_pyttsx3(text)
 
     def text_to_speech_pyttsx3(self, text: str) -> bool:
         """Speak text through the local system TTS engine."""
+        if not local_tts_playback_available():
+            return False
+
         try:
             with TTS_LOCK:
                 TTS_ENGINE.say(text)
@@ -1110,31 +1251,47 @@ class VoiceAssistant:
                 if text:
                     print(f"Injected command consumed: {text}")
                 else:
-                    # Record audio or get text input
-                    audio_data = self.record_audio()
+                    text_from_fallback = False
+                    if not self.microphone_available:
+                        text = await self.wait_for_text_fallback_command()
+                        if self.reload_event and self.reload_event.is_set():
+                            print("Auto environment reload requested. Stopping current assistant.")
+                            return "reload"
+                        if not text:
+                            continue
+                        print(f"Text fallback command consumed: {text}")
+                        text_from_fallback = True
+                        audio_data = None
+                    else:
+                        audio_data = self.record_audio()
+
                     if self.reload_event and self.reload_event.is_set():
                         print("Auto environment reload requested. Stopping current assistant.")
                         return "reload"
-                    if not audio_data:
+                    if text_from_fallback:
+                        pass
+                    elif not self.microphone_available:
                         continue
+                    elif not audio_data:
+                        continue
+                    else:
+                        # Convert to text
+                        text = self.audio_to_text(audio_data)
+                        if self.reload_event and self.reload_event.is_set():
+                            print("Auto environment reload requested. Stopping current assistant.")
+                            return "reload"
+                        if not text:
+                            continue
 
-                    # Convert to text
-                    text = self.audio_to_text(audio_data)
-                    if self.reload_event and self.reload_event.is_set():
-                        print("Auto environment reload requested. Stopping current assistant.")
-                        return "reload"
-                    if not text:
-                        continue
-
-                    should_process, matched_wake_word, command_text = apply_wake_word(text, self.wake_words)
-                    if not should_process:
-                        print("Wake word not detected. Ignoring transcription.")
-                        continue
-                    if matched_wake_word:
-                        print(f"Wake word detected: {matched_wake_word}")
-                        if command_text != text:
-                            print(f"Command after wake word: {command_text}")
-                    text = command_text
+                        should_process, matched_wake_word, command_text = apply_wake_word(text, self.wake_words)
+                        if not should_process:
+                            print("Wake word not detected. Ignoring transcription.")
+                            continue
+                        if matched_wake_word:
+                            print(f"Wake word detected: {matched_wake_word}")
+                            if command_text != text:
+                                print(f"Command after wake word: {command_text}")
+                        text = command_text
 
                 # Process command
                 process_task = asyncio.create_task(self.process_command(text))
@@ -1170,7 +1327,8 @@ class VoiceAssistant:
             # Cleanup
             self.stop_thinking_sound()
             self.audio.terminate()
-            pygame.mixer.quit()
+            if self.pygame_mixer_available:
+                pygame.mixer.quit()
             if self.mcp_client and self.mcp_client.sessions:
                 await self.mcp_client.close_all_sessions()
 
