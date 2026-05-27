@@ -1,4 +1,4 @@
-<h1 align="center"> MCP Voice Assistant </h1>
+<h1 align="center"> MCP Live Stage Assistant </h1>
 <div align="center" style="margin: 0 auto; max-width: 20%;">
 <h2 align="center">built with</h2>
   <picture>
