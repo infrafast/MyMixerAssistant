@@ -85,7 +85,7 @@ class WebMonitor:
         self._stdout_original: TextIO | None = None
         self._stderr_original: TextIO | None = None
         self._llm_options_handler: Callable[[str | None], dict[str, Any]] | None = None
-        self._llm_config_save_handler: Callable[[str, str], dict[str, Any]] | None = None
+        self._llm_config_save_handler: Callable[[str, str, str, str], dict[str, Any]] | None = None
         self._started_at = time.time()
         self._snapshot: dict[str, Any] = {
             "mode": "unknown",
@@ -102,7 +102,7 @@ class WebMonitor:
         self,
         *,
         options_handler: Callable[[str | None], dict[str, Any]],
-        save_handler: Callable[[str, str], dict[str, Any]],
+        save_handler: Callable[[str, str, str, str], dict[str, Any]],
     ) -> None:
         """Register callbacks used by the web UI to list and save LLM settings."""
         with self._lock:
@@ -224,12 +224,11 @@ class WebMonitor:
                     if not provider:
                         self.send_error(400, "Provider is required")
                         return
-                    if not model:
-                        self.send_error(400, "LLM model is required")
-                        return
+                    voice_id = str(payload.get("voice_id") or "").strip()
+                    thinking_sound_file = str(payload.get("thinking_sound_file") or "").strip()
 
                     try:
-                        result = handler(provider, model)
+                        result = handler(provider, model, voice_id, thinking_sound_file)
                     except ValueError as e:
                         self.send_error(400, str(e))
                         return
@@ -615,6 +614,14 @@ INDEX_HTML = """<!doctype html>
             <select id="llm-model"></select>
           </div>
           <button id="llm-save" type="button">Save</button>
+          <div class="field">
+            <label for="elevenlabs-voice">ElevenLabs Voice</label>
+            <select id="elevenlabs-voice"></select>
+          </div>
+          <div class="field">
+            <label for="thinking-sound">Thinking Sound</label>
+            <select id="thinking-sound"></select>
+          </div>
           <div class="config-message" id="llm-message"></div>
         </div>
         <textarea id="config" readonly spellcheck="false"></textarea>
@@ -644,6 +651,8 @@ INDEX_HTML = """<!doctype html>
     const injectSubmit = document.querySelector("#inject-submit");
     const llmProvider = document.querySelector("#llm-provider");
     const llmModel = document.querySelector("#llm-model");
+    const elevenlabsVoice = document.querySelector("#elevenlabs-voice");
+    const thinkingSound = document.querySelector("#thinking-sound");
     const llmSave = document.querySelector("#llm-save");
     const llmMessage = document.querySelector("#llm-message");
     let llmControlsInitialized = false;
@@ -679,6 +688,8 @@ INDEX_HTML = """<!doctype html>
       llmOptionsLoading = true;
       llmProvider.disabled = true;
       llmModel.disabled = true;
+      elevenlabsVoice.disabled = true;
+      thinkingSound.disabled = true;
       llmSave.disabled = true;
       llmMessage.textContent = "Loading LLM options...";
       try {
@@ -713,13 +724,43 @@ INDEX_HTML = """<!doctype html>
           }
         }
 
+        elevenlabsVoice.replaceChildren();
+        const selectedVoiceId = data.selected_voice_id || "";
+        const voices = data.voices || [];
+        if (voices.length === 0) {
+          elevenlabsVoice.appendChild(option("No voice available", "", true, true));
+        } else {
+          for (const voice of voices) {
+            elevenlabsVoice.appendChild(option(voice.label || voice.id, voice.id, false, voice.id === selectedVoiceId));
+          }
+          if (selectedVoiceId && !voices.some((voice) => voice.id === selectedVoiceId)) {
+            elevenlabsVoice.appendChild(option(`${selectedVoiceId} (current)`, selectedVoiceId, false, true));
+          }
+        }
+
+        thinkingSound.replaceChildren();
+        const selectedThinkingSound = data.selected_thinking_sound_file || "";
+        const sounds = data.thinking_sounds || [];
+        if (sounds.length === 0) {
+          thinkingSound.appendChild(option("No WAV available", "", true, true));
+        } else {
+          for (const sound of sounds) {
+            thinkingSound.appendChild(option(sound.label || sound.id, sound.id, false, sound.id === selectedThinkingSound));
+          }
+          if (selectedThinkingSound && !sounds.some((sound) => sound.id === selectedThinkingSound)) {
+            thinkingSound.appendChild(option(`${selectedThinkingSound} (current)`, selectedThinkingSound, false, true));
+          }
+        }
+
         llmMessage.textContent = data.message || "";
       } catch (error) {
         llmMessage.textContent = `LLM options unavailable: ${error}`;
       } finally {
         llmProvider.disabled = false;
         llmModel.disabled = llmModel.options.length === 0 || !llmModel.value;
-        llmSave.disabled = !llmProvider.value || !llmModel.value;
+        elevenlabsVoice.disabled = elevenlabsVoice.options.length === 0 || !elevenlabsVoice.value;
+        thinkingSound.disabled = thinkingSound.options.length === 0 || !thinkingSound.value;
+        llmSave.disabled = !llmProvider.value;
         llmOptionsLoading = false;
       }
     }
@@ -790,7 +831,9 @@ INDEX_HTML = """<!doctype html>
     llmSave.addEventListener("click", async () => {
       const provider = llmProvider.value;
       const model = llmModel.value;
-      if (!provider || !model) return;
+      const voiceId = elevenlabsVoice.value;
+      const thinkingSoundFile = thinkingSound.value;
+      if (!provider) return;
 
       llmSave.disabled = true;
       llmMessage.textContent = "Saving...";
@@ -798,7 +841,12 @@ INDEX_HTML = """<!doctype html>
         const response = await fetch("/api/llm-config", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider, model })
+          body: JSON.stringify({
+            provider,
+            model,
+            voice_id: voiceId,
+            thinking_sound_file: thinkingSoundFile
+          })
         });
         if (!response.ok) throw new Error(await response.text());
         const data = await response.json();
@@ -807,7 +855,7 @@ INDEX_HTML = """<!doctype html>
       } catch (error) {
         llmMessage.textContent = `Save failed: ${error}`;
       } finally {
-        llmSave.disabled = !llmProvider.value || !llmModel.value;
+        llmSave.disabled = !llmProvider.value;
       }
     });
   </script>

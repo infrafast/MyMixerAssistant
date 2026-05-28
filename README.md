@@ -170,7 +170,8 @@ STT_PROMPT="Commandes courtes en français..."   # Optional context prompt for W
 TTS_PROVIDER=elevenlabs                         # elevenlabs | pyttsx3 | none
 
 # Voice Settings
-ELEVENLABS_VOICE_ID=ZF6FPAbjXT4488VcRRnw      # Default: Rachel voice
+ELEVENLABS_VOICE_OPTIONS=kENkNtk0xyzG09WW40xE (Marcel), 1EmYoP3UnnnwhlJKovEy (Anthony)
+ELEVENLABS_VOICE_ID=1EmYoP3UnnnwhlJKovEy      # Selected ElevenLabs voice ID
 
 # Optional - Audio Configuration
 VOICE_SILENCE_THRESHOLD=500                     # Lower = more sensitive
@@ -538,8 +539,16 @@ assistant = VoiceAssistant(
 )
 ```
 
-Nice voice ID:
-- french: kENkNtk0xyzG09WW40xE (natural) , 1EmYoP3UnnnwhlJKovEy (through phone)
+Nice voice ID examples:
+
+The web monitor voice dropdown is populated from `ELEVENLABS_VOICE_OPTIONS` in the selected `.env` profile, not from this README. Define the voices you want to expose like this:
+
+```env
+ELEVENLABS_VOICE_OPTIONS=kENkNtk0xyzG09WW40xE (Marcel), 1EmYoP3UnnnwhlJKovEy (Anthony), FFXYdAYPzn8Tw8KiHZqg (Ingrid), YxrwjAKoUKULGd0g8K9Y (Lucie)
+ELEVENLABS_VOICE_ID=1EmYoP3UnnnwhlJKovEy
+```
+
+Each entry uses `voice_id (Display name)`. The dropdown shows the display name and saves the selected voice ID to `ELEVENLABS_VOICE_ID`.
 
 ## Troubleshooting
 

@@ -1491,11 +1491,33 @@ async def main():
         )
         return [{"id": name, "label": name} for name in names], None
 
+    def parse_elevenlabs_voice_options(value: str) -> list[dict[str, str]]:
+        voices = []
+        for voice_id, label in re.findall(r"([A-Za-z0-9_-]+)\s*\(([^)]+)\)", value or ""):
+            voices.append({"id": voice_id, "label": label.strip()})
+        return voices
+
+    def list_elevenlabs_voice_options(values: dict) -> list[dict[str, str]]:
+        return parse_elevenlabs_voice_options(values.get("ELEVENLABS_VOICE_OPTIONS") or "")
+
+    def list_thinking_sound_options() -> list[dict[str, str]]:
+        assets_dir = Path("assets")
+        if not assets_dir.exists():
+            return []
+
+        return [
+            {"id": wav_path.name, "label": wav_path.name}
+            for wav_path in sorted(assets_dir.glob("*.wav"), key=lambda path: path.name.lower())
+            if wav_path.is_file()
+        ]
+
     def build_llm_options(env_file: Path, requested_provider: str | None = None) -> dict[str, Any]:
         values = dict(dotenv_values(env_file))
         current_provider = (values.get("LLM_PROVIDER") or "openai").strip().lower()
         provider = (requested_provider or current_provider or "openai").strip().lower()
         current_model = (values.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
+        current_voice_id = (values.get("ELEVENLABS_VOICE_ID") or DEFAULT_ELEVENLABS_VOICE_ID).strip()
+        current_thinking_sound_file = (values.get("THINKING_SOUND_FILE") or "thinking.wav").strip()
         internet_online = check_internet_connection()
 
         provider_entries = [
@@ -1529,6 +1551,10 @@ async def main():
             "providers": provider_entries,
             "models": models,
             "selected_model": current_model if provider == current_provider else "",
+            "voices": list_elevenlabs_voice_options(values),
+            "selected_voice_id": current_voice_id,
+            "thinking_sounds": list_thinking_sound_options(),
+            "selected_thinking_sound_file": current_thinking_sound_file,
             "message": message,
         }
 
@@ -1536,26 +1562,57 @@ async def main():
         env_file: Path,
         provider: str,
         model: str,
+        voice_id: str,
+        thinking_sound_file: str,
         web_monitor: WebMonitor | None,
         reload_event: threading.Event | None,
     ) -> dict[str, Any]:
         provider = provider.strip().lower()
         model = model.strip()
+        voice_id = voice_id.strip()
+        thinking_sound_file = thinking_sound_file.strip()
         if provider not in {"openai", "ollama"}:
             raise ValueError(f"unsupported LLM provider: {provider}")
-        if provider == "openai" and not check_internet_connection():
-            raise ValueError("OpenAI cannot be selected while internet is offline")
+
+        values = dict(dotenv_values(env_file))
+        current_provider = (values.get("LLM_PROVIDER") or "openai").strip().lower()
+        current_model = (values.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
+        if not model:
+            model = current_model
         if not model:
             raise ValueError("LLM model is required")
 
-        values = dict(dotenv_values(env_file))
-        available_models, reason = (list_openai_models(values) if provider == "openai" else list_ollama_models(values))
-        if reason:
-            raise ValueError(reason)
-        if available_models and model not in {item["id"] for item in available_models}:
-            raise ValueError(f"model '{model}' is not available for provider '{provider}'")
+        llm_changed = provider != current_provider or model != current_model
+        if llm_changed and provider == "openai" and not check_internet_connection():
+            raise ValueError("OpenAI cannot be selected while internet is offline")
+        if llm_changed:
+            available_models, reason = (list_openai_models(values) if provider == "openai" else list_ollama_models(values))
+            if reason:
+                raise ValueError(reason)
+            if available_models and model not in {item["id"] for item in available_models}:
+                raise ValueError(f"model '{model}' is not available for provider '{provider}'")
 
-        update_env_file_values(env_file, {"LLM_PROVIDER": provider, "OPENAI_MODEL": model})
+        voice_options = list_elevenlabs_voice_options(values)
+        if not voice_id:
+            voice_id = (values.get("ELEVENLABS_VOICE_ID") or DEFAULT_ELEVENLABS_VOICE_ID).strip()
+        if voice_options and voice_id not in {item["id"] for item in voice_options}:
+            raise ValueError(f"voice '{voice_id}' is not listed in ELEVENLABS_VOICE_OPTIONS")
+
+        thinking_sound_options = list_thinking_sound_options()
+        if not thinking_sound_file:
+            thinking_sound_file = (values.get("THINKING_SOUND_FILE") or "thinking.wav").strip()
+        if thinking_sound_options and thinking_sound_file not in {item["id"] for item in thinking_sound_options}:
+            raise ValueError(f"thinking sound '{thinking_sound_file}' is not a WAV file in assets/")
+
+        update_env_file_values(
+            env_file,
+            {
+                "LLM_PROVIDER": provider,
+                "OPENAI_MODEL": model,
+                "ELEVENLABS_VOICE_ID": voice_id,
+                "THINKING_SOUND_FILE": thinking_sound_file,
+            },
+        )
         values = dict(dotenv_values(env_file))
         mcp_config = load_mcp_config_from_values(values)
         if web_monitor:
@@ -1578,7 +1635,9 @@ async def main():
             "saved": True,
             "provider": provider,
             "model": model,
-            "message": "LLM configuration saved. Restarting assistant with the new model.",
+            "voice_id": voice_id,
+            "thinking_sound_file": thinking_sound_file,
+            "message": "Configuration saved. Restarting assistant with the new settings.",
         }
 
     def clear_env_keys(env_files: list[Path]) -> None:
@@ -1768,7 +1827,15 @@ async def main():
     if web_monitor:
         web_monitor.set_llm_config_handlers(
             options_handler=lambda provider=None: build_llm_options(env_file, provider),
-            save_handler=lambda provider, model: save_llm_config(env_file, provider, model, web_monitor, reload_event),
+            save_handler=lambda provider, model, voice_id, thinking_sound_file: save_llm_config(
+                env_file,
+                provider,
+                model,
+                voice_id,
+                thinking_sound_file,
+                web_monitor,
+                reload_event,
+            ),
         )
 
     if auto_selection_message:
