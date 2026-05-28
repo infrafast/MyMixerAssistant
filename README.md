@@ -82,7 +82,7 @@ For developpers: https://deepwiki.com/infrafast/LiveStageAssistant
 3. **Node.js** (for MCP servers)
 4. **System dependencies**:
    - macOS: `brew install portaudio`
-   - Ubuntu/Debian: `sudo apt-get install portaudio19-dev`
+   - Ubuntu/Debian/Raspberry Pi OS: `sudo apt-get install portaudio19-dev alsa-utils ffmpeg espeak espeak-ng libespeak1 libespeak-ng1`
    - Windows: PyAudio wheel includes PortAudio
 5. **Ollama** (optional, required for offline LLM mode)
 
@@ -566,6 +566,7 @@ Each entry uses `voice_id (Display name)`. The dropdown shows the display name a
    - Check API quotas
    - Use `TTS_PROVIDER=pyttsx3` in the selected env file for fully local TTS
    - System will fall back to pyttsx3 if ElevenLabs fails
+   - On Ubuntu/Debian/Raspberry Pi OS, install the system TTS/audio packages: `sudo apt-get install alsa-utils ffmpeg espeak espeak-ng libespeak1 libespeak-ng1`
    - In headless environments without ALSA, `ffplay`, or `aplay`, spoken output is skipped without noisy playback errors. Use `TTS_PROVIDER=none` to make silent mode explicit.
 
 3. **MCP Server Connection Issues**

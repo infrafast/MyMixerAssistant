@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import signal
 import sys
 import tempfile
 import threading
@@ -48,6 +49,7 @@ except ImportError:
 
 TTS_ENGINE = pyttsx3.init()
 TTS_LOCK = threading.Lock()
+FORCE_EXIT_REQUESTED = threading.Event()
 DEFAULT_ELEVENLABS_VOICE_ID = "1EmYoP3UnnnwhlJKovEy"  # french male; ZF6FPAbjXT4488VcRRnw = english female
 LOGGER = logging.getLogger(__name__)
 AUTO_ENV_ONLINE = Path(".env.online")
@@ -120,6 +122,14 @@ def check_internet_connection(
             return True
     except OSError:
         return False
+
+
+def request_force_exit(_signum=None, _frame=None) -> None:
+    """Let the first Ctrl+C unwind normally and make repeated Ctrl+C decisive."""
+    if FORCE_EXIT_REQUESTED.is_set():
+        os._exit(130)
+    FORCE_EXIT_REQUESTED.set()
+    raise KeyboardInterrupt
 
 
 def read_secret_from_env_values(values: dict, name: str) -> str | None:
@@ -1347,12 +1357,28 @@ class VoiceAssistant:
             return "exit"
         finally:
             # Cleanup
-            self.stop_thinking_sound()
-            self.audio.terminate()
+            try:
+                self.stop_thinking_sound()
+            except Exception:
+                pass
+            try:
+                self.audio.terminate()
+            except Exception:
+                pass
             if self.pygame_mixer_available:
-                pygame.mixer.quit()
+                try:
+                    pygame.mixer.quit()
+                except Exception:
+                    pass
+            try:
+                TTS_ENGINE.stop()
+            except Exception:
+                pass
             if self.mcp_client and self.mcp_client.sessions:
-                await self.mcp_client.close_all_sessions()
+                try:
+                    await asyncio.wait_for(self.mcp_client.close_all_sessions(), timeout=3.0)
+                except Exception as e:
+                    print(f"MCP cleanup timed out or failed: {e}")
 
         return "exit"
 
@@ -1902,4 +1928,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    signal.signal(signal.SIGINT, request_force_exit)
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
