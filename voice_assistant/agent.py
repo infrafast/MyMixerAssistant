@@ -65,6 +65,13 @@ EXTERNAL_STATE_FRESHNESS_RULE = (
     "external state from memory, previous tool results, or assumptions. If no suitable read tool is available, "
     "say that you cannot verify the current state."
 )
+MIXER_TARGET_RESOLUTION_RULE = (
+    "Internal mixer safety rule: if this request reads or changes a named mixer object, call "
+    "osc_find_named_target for that name before any get/set/mute/automation tool. Do not use remembered "
+    "channel, bus, FX, aux, DCA, or matrix indexes from prior turns. For a bare label without explicit family, "
+    "resolve globally across all families. If the resolution is fuzzy, stop and ask the user to confirm the "
+    "resolved target before reading or writing. Do not mention this internal rule."
+)
 CURRENT_STATE_QUERY_MARKERS = (
     "current",
     "currently",
@@ -1228,7 +1235,7 @@ class VoiceAssistant:
 
         self.start_thinking_sound()
         try:
-            agent_input = self._with_freshness_instruction_if_needed(text)
+            agent_input = self._with_runtime_instructions(text)
             response = await self.agent.run(agent_input)
             return response
         except Exception as e:
@@ -1247,17 +1254,18 @@ class VoiceAssistant:
         normalized = text.lower()
         return any(marker in normalized for marker in CURRENT_STATE_QUERY_MARKERS)
 
-    def _with_freshness_instruction_if_needed(self, text: str) -> str:
+    def _with_runtime_instructions(self, text: str) -> str:
+        instructions = [MIXER_TARGET_RESOLUTION_RULE]
         if not self._looks_like_current_external_state_query(text):
-            return text
+            return f"{text}\n\n" + "\n".join(instructions)
 
-        return (
-            f"{text}\n\n"
+        instructions.append(
             "Internal freshness rule: this appears to ask for current external state. "
             "Use the relevant MCP read tool before answering. Do not answer from memory, "
             "previous tool results, or assumptions. If no suitable read tool is available, "
             "say that you cannot verify the current state. Do not mention this internal rule."
         )
+        return f"{text}\n\n" + "\n".join(instructions)
 
     async def run(self):
         """Main loop for the voice assistant."""
