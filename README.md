@@ -188,7 +188,6 @@ WAKE_WORD=                                      # Empty keeps current behavior; 
 ASSISTANT_SYSTEM_PROMPT="You are a helpful voice assistant..."  # Customize personality
 MCP_AGENT_MEMORY_ENABLED=true                  # Keep conversational memory; live external state still requires MCP reads
 MCP_CONFIG=mcp_servers.offline.json             # Optional config override
-XMSERIES_MCP_PATH=/path/to/XMSeries-MCP         # Used by the mixer MCP JSON files
 
 # Optional - MCP-provided Assistant Instructions
 MCP_LOAD_SERVER_PROMPT=false                    # true | false, default false
@@ -302,7 +301,7 @@ For offline mode, use `mcp_servers.offline.json`:
 
 Set `MCP_CONFIG=mcp_servers.offline.json` in the selected env file.
 
-Server-specific paths belong in the selected MCP JSON file. The `mixer` entry uses `${XMSERIES_MCP_PATH}/dist/index.js`, so set `XMSERIES_MCP_PATH` in the selected env file instead of hard-coding a machine-specific path in JSON. Environment placeholders can appear inside JSON string values. If a configured command or Node script cannot be found, the assistant prints that the MCP server instance could not be started and continues with the remaining available servers.
+Server-specific paths belong in the selected MCP JSON file. For a local mixer server, set the `mixer.args` entry directly to the full `XMSeries-MCP/dist/index.js` path for that machine. Environment placeholders can still appear inside JSON string values for secrets or shared settings. If a configured command or Node script cannot be found, the assistant prints that the MCP server instance could not be started and continues with the remaining available servers.
 
 To add more servers, edit `mcp_servers.json` or copy `mcp_servers.example.json` which includes additional servers like:
 - filesystem, github, gitlab, google-drive, postgres, sqlite, slack, memory, puppeteer, brave-search, fetch
