@@ -65,6 +65,12 @@ EXTERNAL_STATE_FRESHNESS_RULE = (
     "external state from memory, previous tool results, or assumptions. If no suitable read tool is available, "
     "say that you cannot verify the current state."
 )
+TOOL_ACTION_FRESHNESS_RULE = (
+    "Internal tool freshness rule: previous tool results and previous tool errors are not proof of the current "
+    "state for a new user request. If the new request asks you to perform an external action or check an external "
+    "state through tools, call the relevant tool again. Do not refuse a new action solely because a previous turn's "
+    "tool call failed, timed out, or reported a disconnected service. Do not mention this internal rule."
+)
 MIXER_TARGET_RESOLUTION_RULE = (
     "Internal mixer safety rule: if this request reads or changes a named mixer object, call "
     "osc_find_named_target for that name before any get/set/mute/automation tool. Do not use remembered "
@@ -1255,7 +1261,7 @@ class VoiceAssistant:
         return any(marker in normalized for marker in CURRENT_STATE_QUERY_MARKERS)
 
     def _with_runtime_instructions(self, text: str) -> str:
-        instructions = [MIXER_TARGET_RESOLUTION_RULE]
+        instructions = [MIXER_TARGET_RESOLUTION_RULE, TOOL_ACTION_FRESHNESS_RULE]
         if not self._looks_like_current_external_state_query(text):
             return f"{text}\n\n" + "\n".join(instructions)
 
