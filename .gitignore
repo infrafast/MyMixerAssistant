@@ -171,6 +171,8 @@ $RECYCLE.BIN/
 /temp/
 /voice_assistant_notes/
 *.wav
+!assets/
+!assets/*.wav
 *.mp3
 *.m4a
 audio_files/

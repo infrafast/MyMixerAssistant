@@ -164,6 +164,7 @@ OLLAMA_BASE_URL=http://localhost:11434
 STT_PROVIDER=openai-whisper                     # openai-whisper | local-whisper
 LOCAL_WHISPER_MODEL=base                        # faster-whisper model size or local model path
 STT_LANGUAGE=auto                               # auto-detect, or force en, fr, etc.
+STT_PROMPT="Commandes courtes en français..."   # Optional context prompt for Whisper
 
 # Text-to-speech settings
 TTS_PROVIDER=elevenlabs                         # elevenlabs | pyttsx3 | none
@@ -186,6 +187,7 @@ WAKE_WORD=                                      # Empty keeps current behavior; 
 ASSISTANT_SYSTEM_PROMPT="You are a helpful voice assistant..."  # Customize personality
 MCP_AGENT_MEMORY_ENABLED=true                  # Keep conversational memory; live external state still requires MCP reads
 MCP_CONFIG=mcp_servers.offline.json             # Optional config override
+XMSERIES_MCP_PATH=/path/to/XMSeries-MCP         # Used by the mixer MCP JSON files
 
 # Optional - MCP-provided Assistant Instructions
 MCP_LOAD_SERVER_PROMPT=false                    # true | false, default false
@@ -299,7 +301,7 @@ For offline mode, use `mcp_servers.offline.json`:
 
 Set `MCP_CONFIG=mcp_servers.offline.json` in the selected env file.
 
-Server-specific paths belong in the selected MCP JSON file. For example, the `mixer` entry uses a Node script path for `XMSeries-MCP/dist/index.js`; update that path in `mcp_servers.json` or `mcp_servers.offline.json` to match your machine. If a configured command or Node script cannot be found, the assistant prints that the MCP server instance could not be started and continues with the remaining available servers.
+Server-specific paths belong in the selected MCP JSON file. The `mixer` entry uses `${XMSERIES_MCP_PATH}/dist/index.js`, so set `XMSERIES_MCP_PATH` in the selected env file instead of hard-coding a machine-specific path in JSON. Environment placeholders can appear inside JSON string values. If a configured command or Node script cannot be found, the assistant prints that the MCP server instance could not be started and continues with the remaining available servers.
 
 To add more servers, edit `mcp_servers.json` or copy `mcp_servers.example.json` which includes additional servers like:
 - filesystem, github, gitlab, google-drive, postgres, sqlite, slack, memory, puppeteer, brave-search, fetch
@@ -458,6 +460,10 @@ With `--env-file auto`, the assistant checks internet connectivity at startup. I
 - `Internet inactive` is announced with the TTS from `.env.offline`
 
 After the announcement, the current voice loop is interrupted if needed, the active assistant instance is cleaned up, and a fresh instance is started from the newly detected env file. This reloads the TTS, STT, LLM, and MCP configuration from the selected profile. Any command currently being recorded or processed may be cancelled during the switch, which keeps the implementation simple and avoids mixing services from two profiles. Once the new assistant is ready, it announces that the environment was updated and the in-flight request was cancelled using the TTS from the new profile.
+
+If you run `python voice_assistant/agent.py` without `--env-file`, the assistant loads `.env` when present. If `.env` does not exist, internal defaults are used: OpenAI with `gpt-4o-mini` for the LLM, OpenAI Whisper for STT, ElevenLabs for TTS when `ELEVENLABS_API_KEY` is available, `thinking.wav` for the processing sound, and `mcp_servers.json` when no explicit MCP config is provided. In that default mode, `OPENAI_API_KEY` is required because both the LLM and STT providers use OpenAI.
+
+For short stage commands, `STT_PROMPT` can give Whisper mixer-specific context. The bundled default biases French mixer commands such as `mets Claude`, `baisse snare`, `mute Voc-Claude`, and the assistant also fixes the narrow transcription artifact where a leading `mets` command is fused with the following channel name.
 
 ### Changing Model Provider
 

@@ -15,6 +15,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import sys
@@ -100,6 +101,12 @@ CURRENT_STATE_QUERY_MARKERS = (
     "a combien",
     "à combien",
 )
+DEFAULT_STT_PROMPT = (
+    "Commandes courtes en français pour une console de mixage. "
+    "Les commandes commencent souvent par: mets, met, règle, baisse, monte, coupe, mute, active, réactive. "
+    "Ne colle pas le verbe 'mets' au nom qui suit: écris 'mets Claude', 'mets Voc-Claude', 'mets snare'."
+)
+FUSED_SET_COMMAND_RE = re.compile(r"^\s*(mets|met|me)([a-zà-ÿ][a-zà-ÿ0-9_-]{3,})(\b|$)", re.IGNORECASE)
 
 
 def check_internet_connection(
@@ -253,6 +260,7 @@ class VoiceAssistant:
         stt_provider: str = "openai-whisper",
         local_whisper_model: str = "base",
         stt_language: str | None = None,
+        stt_prompt: str | None = None,
         tts_provider: str = "elevenlabs",
         elevenlabs_voice_id: str = DEFAULT_ELEVENLABS_VOICE_ID,
         thinking_sound_file: str = "thinking.wav",
@@ -284,6 +292,7 @@ class VoiceAssistant:
             stt_provider: Speech-to-text provider (openai-whisper or local-whisper)
             local_whisper_model: Local faster-whisper model size or path
             stt_language: Transcription language code, or None for auto-detect
+            stt_prompt: Optional STT context prompt to bias short command transcription
             tts_provider: Text-to-speech provider (elevenlabs, pyttsx3, or none)
             elevenlabs_voice_id: ElevenLabs voice ID (default: Rachel)
             thinking_sound_file: WAV file to loop while the LLM/MCP agent is processing a command
@@ -327,6 +336,7 @@ class VoiceAssistant:
         self.stt_provider = stt_provider.lower()
         self.local_whisper_model_name = local_whisper_model
         self.stt_language = stt_language or None
+        self.stt_prompt = stt_prompt or DEFAULT_STT_PROMPT
         self.openai_client = None
         self.local_whisper_model = None
         if self.stt_provider == "openai-whisper":
@@ -462,11 +472,8 @@ class VoiceAssistant:
             return [self._substitute_env_vars(item) for item in config]
 
         if isinstance(config, str):
-            # Support full-value env placeholders like "${API_KEY}"
-            if config.startswith("${") and config.endswith("}"):
-                env_key = config[2:-1]
-                return os.getenv(env_key, "")
-            return config
+            # Support env placeholders anywhere in the string, e.g. "${ROOT}/dist/index.js".
+            return re.sub(r"\$\{([^}]+)\}", lambda match: os.getenv(match.group(1), ""), config)
 
         return config
 
@@ -1072,6 +1079,18 @@ class VoiceAssistant:
             return self.audio_to_text_local_whisper(audio_data)
         return self.audio_to_text_openai_whisper(audio_data)
 
+    def normalize_stt_command_text(self, text: str) -> str:
+        """Fix narrow STT artifacts that hurt short mixer commands."""
+        cleaned = text.strip()
+
+        def split_fused_set_command(match: re.Match[str]) -> str:
+            verb = match.group(1)
+            target = match.group(2)
+            canonical_verb = "mets" if verb.lower() in {"me", "met", "mets"} else verb
+            return f"{canonical_verb} {target}"
+
+        return FUSED_SET_COMMAND_RE.sub(split_fused_set_command, cleaned, count=1)
+
     def audio_to_text_openai_whisper(self, audio_data: bytes) -> str | None:
         """Convert audio to text using OpenAI Whisper API."""
         if not self.openai_client:
@@ -1087,9 +1106,12 @@ class VoiceAssistant:
             kwargs = {"model": "whisper-1", "file": wav_buffer}
             if self.stt_language:
                 kwargs["language"] = self.stt_language
+            if self.stt_prompt:
+                kwargs["prompt"] = self.stt_prompt
             response = self.openai_client.audio.transcriptions.create(**kwargs)
 
-            return response.text.strip()
+            text = response.text.strip()
+            return self.normalize_stt_command_text(text) if text else None
 
         except Exception as e:
             print(f"Error transcribing audio: {e}")
@@ -1107,9 +1129,9 @@ class VoiceAssistant:
                 wav_path = wav_file.name
                 self._write_wav(audio_data, wav_file)
 
-            segments, _info = model.transcribe(wav_path, language=self.stt_language)
+            segments, _info = model.transcribe(wav_path, language=self.stt_language, initial_prompt=self.stt_prompt)
             text = "".join(segment.text for segment in segments).strip()
-            return text or None
+            return self.normalize_stt_command_text(text) if text else None
 
         except Exception as e:
             print(f"Error transcribing audio locally: {e}")
@@ -1590,6 +1612,7 @@ async def main():
         local_whisper_model = os.getenv("LOCAL_WHISPER_MODEL", "base")
         stt_language_value = os.getenv("STT_LANGUAGE", "auto")
         stt_language = None if stt_language_value.lower() == "auto" else stt_language_value
+        stt_prompt = os.getenv("STT_PROMPT", DEFAULT_STT_PROMPT)
         tts_provider = os.getenv("TTS_PROVIDER", "elevenlabs").lower()
         voice_id = os.getenv("ELEVENLABS_VOICE_ID", DEFAULT_ELEVENLABS_VOICE_ID)
         thinking_sound_file = os.getenv("THINKING_SOUND_FILE", "thinking.wav")
@@ -1670,6 +1693,7 @@ async def main():
             stt_provider=stt_provider,
             local_whisper_model=local_whisper_model,
             stt_language=stt_language,
+            stt_prompt=stt_prompt,
             tts_provider=tts_provider,
             elevenlabs_voice_id=voice_id,
             thinking_sound_file=thinking_sound_file,
