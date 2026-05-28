@@ -233,3 +233,6 @@ ELEVENLABS_API_KEY.txt
 .settings/
 exportkey.sh
 garbage.txt
+
+mcp_servers_infrafasthttp.json
+.env.infrafasthttp
