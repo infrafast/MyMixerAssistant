@@ -46,7 +46,7 @@ For developpers: https://deepwiki.com/infrafast/LiveStageAssistant
 - 🌐 **Multiple Model Providers**: Works with OpenAI or local Ollama models that support tool calling
 - 🛠️ **Multi-Tool Integration**: Seamlessly connects to any MCP servers:
 - 🧭 **MCP-provided Startup Instructions**: Optionally loads system instructions from MCP prompts, resources, or one configured fallback tool
-- 🖥️ **Local Web Monitor**: Read-only runtime state, active config, console logs, final prompt, and manual command injection
+- 🖥️ **Local Web Monitor**: Chat-style command UI, runtime state, active config, console logs, final prompt, request cancellation, and manual command injection
 - 💾 **Conversational Memory**: Maintains context across interactions
 - 🗣️ **Optional Wake Word**: Gate spoken commands with a global wake word after STT transcription
 - 🎯 **Extensible**: Easy to add new MCP servers and capabilities
@@ -247,10 +247,11 @@ ELEVENLABS_VOICE_ID=1EmYoP3UnnnwhlJKovEy      # Selected ElevenLabs voice ID
 # Optional - Audio Configuration
 VOICE_SILENCE_THRESHOLD=500                     # Lower = more sensitive
 VOICE_SILENCE_DURATION=1.5                      # Seconds to wait after speech
+VOICE_CANCEL_DURING_THINKING=false             # Optional spoken stop/annule cancel listener while processing
 THINKING_SOUND_FILE=thinking.wav                # WAV loop while the LLM/MCP agent processes the command
 
-# Optional - Read-only local web monitor
-WEB_MONITOR_ENABLED=true                        # Serve runtime state, config, logs, and final prompt
+# Optional - local web monitor
+WEB_MONITOR_ENABLED=true                        # Serve chat UI, runtime state, config, logs, and final prompt
 WEB_MONITOR_HOST=127.0.0.1
 WEB_MONITOR_PORT=8765
 
@@ -300,19 +301,34 @@ When `WEB_MONITOR_ENABLED=true`, the assistant starts a local web monitor and pr
 Web monitor available at http://127.0.0.1:8765
 ```
 
-The monitor exposes:
+The web monitor is intentionally split between a clean chat surface and a technical settings overlay:
 
-- **State**: current online/offline status, selected env profile, and LLM/STT/TTS/MCP status indicators
-- **Inject Command**: a text input that queues a command for the agent
-- **Config**: active env and MCP JSON configuration with secrets redacted and possibility to change LLM provider on the fly
-- **Console Log**: the same Python console output mirrored into the page
-- **Prompt**: the final system prompt after local and MCP-provided prompt merge
+- The main page is a ChatGPT-like command window. User commands appear as right-aligned bubbles and assistant/TTS responses appear as left-aligned bubbles.
+- The command input stays pinned to the bottom of the page. Press Enter or the up-arrow button to send; Shift+Enter inserts a newline.
+- While the LLM/MCP agent is processing, the input is disabled and the response area shows a small thinking animation. The send arrow becomes a square stop button.
+- Pressing the stop button calls `/api/cancel-command`, cancels the active agent task, clears the busy state, and returns the assistant to listening.
+- The top-right settings button opens an overlay. The first tab contains **State**, **Console Log**, and **Prompt** collapsibles. The second tab contains **Config**.
 
-The console output path is centralized for Python `stdout` and `stderr`: the same filtered text is written to the terminal and to **Console Log**. High-frequency OSC heartbeat reads for `/xremote` and `/xinfo` are filtered out in both places; other OSC reads and writes remain visible when they pass through the Python console stream.
+The monitor exposes these HTTP endpoints:
 
-Injected commands are treated as direct text input after wake word handling. This means the text entered in **Inject Command** should be the command itself, without the wake word. After the monitor accepts the command, the input is cleared. The agent logs the command as consumed before processing it.
+- `GET /api/snapshot`: returns runtime state, logs, dialogue messages, `assistant_busy`, config, prompt, and service status.
+- `POST /api/inject-command`: queues a text command for the agent.
+- `POST /api/cancel-command`: requests cancellation of the currently processing command.
+- `GET /api/llm-options` and `POST /api/llm-config`: back the provider/model/voice/thinking-sound controls in the config tab.
 
-The monitor remains decoupled from the assistant logic. The web page only queues text; the agent remains responsible for consuming and processing it. If the assistant is already inside microphone recording when a command is injected, the recording loop stops early and the queued command is consumed immediately after the microphone stream closes.
+Dialogue and technical logs are separate. The main chat only displays user commands and assistant responses. Python `stdout`, `stderr`, and existing `logging.StreamHandler` instances are mirrored into **Settings > Monitor > Console Log**, so tool traces such as OSC read/write logs stay available without cluttering the main dialogue.
+
+OSC log lines are no longer filtered out by the web monitor. If the terminal prints an MCP/tool trace such as `[OSC READ]`, `/xinfo`, or `[OSC WRITE]`, the same text should be visible in **Console Log**.
+
+Injected commands are treated as direct text input after wake word handling. This means the text entered in the chat box should be the command itself, without the wake word. After the monitor accepts the command, the input is cleared. The agent logs the command as consumed before processing it.
+
+The monitor remains decoupled from the assistant logic. The web page queues text and cancellation requests; the agent remains responsible for consuming, processing, cancelling, and returning to microphone/text fallback listening. If the assistant is already inside microphone recording when a command is injected, the recording loop stops early and the queued command is consumed immediately after the microphone stream closes.
+
+#### Voice Cancel During Thinking
+
+`VOICE_CANCEL_DURING_THINKING=false` is the default and preserves the current behavior: no extra microphone listener is started while the assistant is processing a command.
+
+When set to `true`, the assistant starts a short-lived parallel listener only during the thinking phase. If it clearly hears one of the configured built-in cancel words, such as `stop`, `stoppe`, `annule`, `annuler`, `arrête`, `arrete`, or `cancel`, it cancels the active LLM/MCP task and returns to listening. This is experimental because it opens the microphone during processing and may be affected by stage noise, thinking sounds, or TTS/audio bleed.
 
 ### Online and Offline Profiles
 
@@ -631,7 +647,7 @@ Each entry uses `voice_id (Display name)`. The dropdown shows the display name a
    - Lower the `silence_threshold` value
    - Verify PyAudio: `python -c "import pyaudio; pyaudio.PyAudio()"`
    - If no default input device is available, the assistant falls back to text commands instead of retrying microphone capture in a tight loop
-   - With the web monitor enabled, use the **Inject Command** field; without it, type commands in the terminal prompt
+   - With the web monitor enabled, use the bottom chat input; without it, type commands in the terminal prompt
 
 2. **TTS Not Working**
    - Verify API keys are set correctly
@@ -654,7 +670,13 @@ Each entry uses `voice_id (Display name)`. The dropdown shows the display name a
    - Set `THINKING_SOUND_FILE=` to leave the thinking sound unset
    - Install an audio backend such as `ffmpeg` or `alsa-utils` only if you need local audio playback
 
-5. **MCP Startup Instructions Not Loaded**
+5. **Voice Cancel During Thinking Is Unreliable**
+   - Keep `VOICE_CANCEL_DURING_THINKING=false` for the most conservative behavior
+   - The web stop button does not depend on microphone/STT and is the reliable cancellation path
+   - If enabling voice cancel, prefer `STT_PROVIDER=local-whisper` for local testing and reduce stage bleed into the microphone
+   - The cancel listener only runs during the thinking phase; it is not a general wake word or always-on command listener
+
+6. **MCP Startup Instructions Not Loaded**
    - Confirm `MCP_LOAD_SERVER_PROMPT=true` in the selected env file
    - Confirm the selected `MCP_CONFIG` file has at least one server with an `assistantPrompt` block
    - Confirm each `assistantPrompt` block defines at least one of `promptName`, `resourceUri`, or `tool`
@@ -662,12 +684,12 @@ Each entry uses `voice_id (Display name)`. The dropdown shows the display name a
    - If the prompt source belongs to a server instance that could not start, such as `mixer`, fix that server's command or script path in the selected MCP JSON file
    - Use `MCP_PROMPT_MERGE_MODE=append` when you want to keep the local voice and TTS constraints
 
-6. **High Latency**
+7. **High Latency**
    - Use faster LLM model (e.g., `gpt-3.5-turbo`)
    - Reduce `max_steps` in MCPAgent
    - Consider using local models
 
-7. **Offline Mode Still Tries to Connect**
+8. **Offline Mode Still Tries to Connect**
    - Confirm you started with `python voice_assistant/agent.py --env-file .env.offline`
    - Confirm the selected env file includes `LLM_PROVIDER=ollama`
    - Confirm the selected env file includes `STT_PROVIDER=local-whisper`
@@ -675,7 +697,7 @@ Each entry uses `voice_id (Display name)`. The dropdown shows the display name a
    - Confirm the selected env file includes `MCP_CONFIG=mcp_servers.offline.json`
    - Ensure the Ollama model, faster-whisper model, and MCP npm packages were cached before disconnecting
 
-8. **Auto Mode Selected The Wrong Profile**
+9. **Auto Mode Selected The Wrong Profile**
    - Start with `python voice_assistant/agent.py --env-file auto`
    - Auto mode checks a short TCP connection to `api.openai.com:443`
    - If that host is blocked by your network, auto mode may select `.env.offline`

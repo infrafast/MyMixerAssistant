@@ -1055,6 +1055,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     function setComposerLocked(locked) {
+      const wasLocked = composerLocked;
       composerLocked = Boolean(locked);
       injectCommand.disabled = composerLocked;
       injectSubmit.disabled = cancelRequestInFlight;
@@ -1063,6 +1064,9 @@ INDEX_HTML = """<!doctype html>
       injectSubmit.title = composerLocked ? "Stop" : "Send";
       injectSubmit.setAttribute("aria-label", composerLocked ? "Stop" : "Send");
       injectCommand.placeholder = composerLocked ? "Assistant is thinking..." : "Message";
+      if (wasLocked && !composerLocked && !settingsOverlay.classList.contains("open")) {
+        window.setTimeout(() => injectCommand.focus({ preventScroll: true }), 0);
+      }
     }
 
     async function cancelCommand() {

@@ -79,6 +79,19 @@ MIXER_TARGET_RESOLUTION_RULE = (
     "resolve globally across all families. If the resolution is fuzzy, stop and ask the user to confirm the "
     "resolved target before reading or writing. Do not mention this internal rule."
 )
+DEFAULT_VOICE_CANCEL_WORDS = (
+    "stop",
+    "stoppe",
+    "stoppé",
+    "annule",
+    "annuler",
+    "annulation",
+    "arrete",
+    "arrête",
+    "arreter",
+    "arrêter",
+    "cancel",
+)
 
 
 @contextmanager
@@ -324,6 +337,7 @@ class VoiceAssistant:
         mcp_prompt_sources: list[dict] | None = None,
         mcp_prompt_merge_mode: str = "append",
         mcp_agent_memory_enabled: bool = True,
+        voice_cancel_during_thinking: bool = False,
         notes_dir: str | None = None,
         system_prompt: str | None = None,
         reload_event: threading.Event | None = None,
@@ -356,6 +370,7 @@ class VoiceAssistant:
             mcp_prompt_sources: Optional ordered list of MCP prompt sources
             mcp_prompt_merge_mode: How to merge remote instructions: append or replace
             mcp_agent_memory_enabled: Whether MCPAgent should keep conversation memory
+            voice_cancel_during_thinking: Listen for short spoken cancel words while the LLM/MCP agent is processing
             notes_dir: Directory for storing notes (default: temp dir)
             system_prompt: Optional custom system prompt for the assistant
             reload_event: Optional event used by auto mode to interrupt and reload the assistant
@@ -369,6 +384,8 @@ class VoiceAssistant:
         self.silence_threshold = silence_threshold
         self.silence_duration = silence_duration
         self.wake_words = wake_words or []
+        self.voice_cancel_during_thinking = voice_cancel_during_thinking
+        self.voice_cancel_words = DEFAULT_VOICE_CANCEL_WORDS
 
         # Initialize audio components
         with suppress_native_stderr():
@@ -1109,6 +1126,91 @@ class VoiceAssistant:
             wf.setframerate(self.rate)
             wf.writeframes(audio_data)
 
+    def record_voice_cancel_audio(self, stop_event: threading.Event) -> bytes | None:
+        """Capture a short audio window while the assistant is thinking."""
+        if not self.microphone_available:
+            return None
+
+        stream = None
+        try:
+            with suppress_native_stderr():
+                stream = self.audio.open(
+                    format=self.audio_format,
+                    channels=self.channels,
+                    rate=self.rate,
+                    input=True,
+                    frames_per_buffer=self.chunk,
+                )
+
+            frames = []
+            silence_frames = 0
+            silence_frame_threshold = max(1, int(self.rate / self.chunk * 0.45))
+            max_frames = max(1, int(self.rate / self.chunk * 1.4))
+            has_speech = False
+
+            while len(frames) < max_frames and not stop_event.is_set():
+                data = stream.read(self.chunk, exception_on_overflow=False)
+                frames.append(data)
+
+                if self.detect_silence(data):
+                    silence_frames += 1
+                    if has_speech and silence_frames > silence_frame_threshold:
+                        break
+                else:
+                    silence_frames = 0
+                    has_speech = True
+
+            if stop_event.is_set() or not has_speech:
+                return None
+            return b"".join(frames)
+
+        except Exception as e:
+            print(f"Voice cancel listener unavailable: {e}")
+            return None
+        finally:
+            if stream:
+                try:
+                    if stream.is_active():
+                        stream.stop_stream()
+                    stream.close()
+                except Exception:
+                    pass
+
+    def is_voice_cancel_phrase(self, text: str) -> bool:
+        normalized = text.strip().lower()
+        normalized = re.sub(r"[^\wÀ-ÿ'-]+", " ", normalized).strip()
+        if not normalized:
+            return False
+        words = set(normalized.split())
+        return any(word in words or normalized == word for word in self.voice_cancel_words)
+
+    async def listen_for_voice_cancel_during_thinking(
+        self,
+        stop_event: threading.Event,
+        process_task: asyncio.Task,
+    ) -> bool:
+        """Return True when a spoken cancel phrase is detected during command processing."""
+        if not self.voice_cancel_during_thinking or not self.microphone_available:
+            return False
+
+        print("Voice cancel listener active during thinking.")
+        while not stop_event.is_set() and not process_task.done():
+            audio_data = await asyncio.to_thread(self.record_voice_cancel_audio, stop_event)
+            if stop_event.is_set() or process_task.done():
+                return False
+            if not audio_data:
+                await asyncio.sleep(0.05)
+                continue
+
+            text = await asyncio.to_thread(self.audio_to_text, audio_data)
+            if not text:
+                continue
+            print(f"Voice cancel listener heard: {text}")
+            if self.is_voice_cancel_phrase(text):
+                return True
+
+        return False
+
     def _load_local_whisper_model(self):
         """Lazy-load faster-whisper so online-only users do not pay the import cost."""
         if self.local_whisper_model:
@@ -1372,29 +1474,68 @@ class VoiceAssistant:
 
                 # Process command
                 process_task = asyncio.create_task(self.process_command(text))
+                voice_cancel_stop_event = None
+                voice_cancel_task = None
+                if self.voice_cancel_during_thinking and self.microphone_available:
+                    voice_cancel_stop_event = threading.Event()
+                    voice_cancel_task = asyncio.create_task(
+                        self.listen_for_voice_cancel_during_thinking(
+                            voice_cancel_stop_event,
+                            process_task,
+                        )
+                    )
                 command_cancelled = False
-                while not process_task.done():
-                    if self.web_monitor and self.web_monitor.pop_cancel_requested():
-                        print("Web monitor cancel requested. Cancelling current command.")
-                        process_task.cancel()
-                        try:
-                            await process_task
-                        except asyncio.CancelledError:
-                            pass
-                        self.web_monitor.set_assistant_busy(False)
-                        command_cancelled = True
-                        break
-                    if self.reload_event and self.reload_event.is_set():
-                        print("Auto environment reload requested. Cancelling current command.")
-                        process_task.cancel()
-                        try:
-                            await process_task
-                        except asyncio.CancelledError:
-                            pass
-                        if self.web_monitor:
+                try:
+                    while not process_task.done():
+                        voice_cancel_detected = False
+                        if voice_cancel_task is not None and voice_cancel_task.done() and not voice_cancel_task.cancelled():
+                            voice_cancel_error = voice_cancel_task.exception()
+                            if voice_cancel_error:
+                                print(f"Voice cancel listener stopped: {voice_cancel_error}")
+                                voice_cancel_task = None
+                            else:
+                                voice_cancel_detected = voice_cancel_task.result()
+                        if self.web_monitor and self.web_monitor.pop_cancel_requested():
+                            print("Web monitor cancel requested. Cancelling current command.")
+                            process_task.cancel()
+                            try:
+                                await process_task
+                            except asyncio.CancelledError:
+                                pass
                             self.web_monitor.set_assistant_busy(False)
-                        return "reload"
-                    await asyncio.sleep(0.1)
+                            command_cancelled = True
+                            break
+                        if voice_cancel_detected:
+                            print("Voice cancel phrase detected. Cancelling current command.")
+                            process_task.cancel()
+                            try:
+                                await process_task
+                            except asyncio.CancelledError:
+                                pass
+                            if self.web_monitor:
+                                self.web_monitor.set_assistant_busy(False)
+                            command_cancelled = True
+                            break
+                        if self.reload_event and self.reload_event.is_set():
+                            print("Auto environment reload requested. Cancelling current command.")
+                            process_task.cancel()
+                            try:
+                                await process_task
+                            except asyncio.CancelledError:
+                                pass
+                            if self.web_monitor:
+                                self.web_monitor.set_assistant_busy(False)
+                            return "reload"
+                        await asyncio.sleep(0.1)
+                finally:
+                    if voice_cancel_stop_event is not None:
+                        voice_cancel_stop_event.set()
+                    if voice_cancel_task is not None and not voice_cancel_task.done():
+                        voice_cancel_task.cancel()
+                        try:
+                            await voice_cancel_task
+                        except asyncio.CancelledError:
+                            pass
 
                 if command_cancelled:
                     continue
@@ -1769,6 +1910,7 @@ async def main():
         thinking_sound_file = os.getenv("THINKING_SOUND_FILE", "thinking.wav")
         silence_threshold = env_int("VOICE_SILENCE_THRESHOLD", 500)
         silence_duration = env_float("VOICE_SILENCE_DURATION", 1.5)
+        voice_cancel_during_thinking = env_bool("VOICE_CANCEL_DURING_THINKING", False)
         wake_words = parse_wake_words(env_optional("WAKE_WORD"))
         system_prompt = env_optional("ASSISTANT_SYSTEM_PROMPT")
         mcp_config_path = env_optional("MCP_CONFIG")
@@ -1794,6 +1936,8 @@ async def main():
         print(f"Using STT provider: {stt_provider}")
         print(f"Using TTS provider: {tts_provider}")
         print(f"Using thinking sound file: {thinking_sound_file}")
+        if voice_cancel_during_thinking:
+            print("Using voice cancel during thinking: enabled")
         print(f"Using wake word: {', '.join(wake_words) if wake_words else 'disabled'}")
         print(f"Using MCP agent memory: {mcp_agent_memory_enabled}")
 
@@ -1855,6 +1999,7 @@ async def main():
             mcp_load_server_prompt=env_bool("MCP_LOAD_SERVER_PROMPT", False),
             mcp_prompt_merge_mode=mcp_prompt_merge_mode,
             mcp_agent_memory_enabled=mcp_agent_memory_enabled,
+            voice_cancel_during_thinking=voice_cancel_during_thinking,
             system_prompt=system_prompt,
             reload_event=reload_event,
             web_monitor=web_monitor,
