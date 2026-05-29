@@ -147,7 +147,7 @@ host:      ./synology/ELEVENLABS_API_KEY.txt
 container: /config/ELEVENLABS_API_KEY.txt
 ```
 
-For a first run on Synology or another headless Docker host, keep `TTS_PROVIDER=none` in `synology/.env` and use the web monitor's text command injection. Microphone and speaker passthrough can be tested later.
+The assistant can run without working audio devices: if microphone capture fails because no input device is available, it falls back to text commands from the web monitor or terminal; if speech playback is unavailable, responses are still printed in the console and monitor. For a first run on Synology or another headless Docker host, `TTS_PROVIDER=none` is only the quietest starting point while you validate the container, MCP, and web monitor. Microphone and speaker passthrough can be tested later.
 
 Build and start:
 
