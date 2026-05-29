@@ -53,6 +53,11 @@ The compose file already includes the commented volume line:
 ```
 
 Enable that line after the folder exists and contains `dist/index.js`.
+The corresponding MCP server path is configured in `synology/mcp_servers.synology.json`, not in the agent `.env` file:
+
+```json
+"args": ["/xmseries-mcp/dist/index.js"]
+```
 
 ## Start
 

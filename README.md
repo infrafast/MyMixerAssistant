@@ -172,8 +172,13 @@ volumes:
 Then keep this value in `synology/.env`:
 
 ```env
-XMSERIES_MCP_PATH=/xmseries-mcp
 MCP_CONFIG=/config/mcp_servers.synology.json
+```
+
+The server script path itself belongs in `synology/mcp_servers.synology.json`, for example:
+
+```json
+"args": ["/xmseries-mcp/dist/index.js"]
 ```
 
 On DSM 7.0, the exact Docker UI depends on the Synology model and installed Docker package. If the Container Manager "Project" interface is not available, use SSH and the `docker compose` command above, or create an equivalent container manually with the same mounts, host network, and port `8765`.
