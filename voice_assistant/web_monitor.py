@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import logging
 from pathlib import Path
 import sys
 import threading
@@ -21,7 +22,6 @@ SECRET_KEY_MARKERS = (
     "PASS",
     "CONNECTION_STRING",
 )
-IGNORED_OSC_READ_PATHS = ("/xremote", "/xinfo")
 
 
 def redact_config_value(key: str, value: Any) -> Any:
@@ -87,6 +87,7 @@ class WebMonitor:
         self._thread: threading.Thread | None = None
         self._stdout_original: TextIO | None = None
         self._stderr_original: TextIO | None = None
+        self._logging_handler_streams: list[tuple[logging.StreamHandler, TextIO]] = []
         self._llm_options_handler: Callable[[str | None], dict[str, Any]] | None = None
         self._llm_config_save_handler: Callable[[str, str, str, str], dict[str, Any]] | None = None
         self._started_at = time.time()
@@ -120,6 +121,7 @@ class WebMonitor:
             self._stderr_original = sys.stderr
             sys.stdout = TeeStream(sys.stdout, self, "stdout")
             sys.stderr = TeeStream(sys.stderr, self, "stderr")
+            self._capture_existing_logging_handlers()
 
     def restore_console_capture(self) -> None:
         with self._lock:
@@ -129,6 +131,34 @@ class WebMonitor:
             if self._stderr_original is not None:
                 sys.stderr = self._stderr_original
                 self._stderr_original = None
+            for handler, stream in self._logging_handler_streams:
+                try:
+                    handler.setStream(stream)
+                except ValueError:
+                    handler.stream = stream
+            self._logging_handler_streams.clear()
+
+    def _capture_existing_logging_handlers(self) -> None:
+        """Route already-created logging handlers through the monitor tee streams."""
+        original_streams = {
+            self._stdout_original: sys.stdout,
+            self._stderr_original: sys.stderr,
+        }
+        for logger in [logging.getLogger(), *logging.Logger.manager.loggerDict.values()]:
+            if not isinstance(logger, logging.Logger):
+                continue
+            for handler in logger.handlers:
+                if not isinstance(handler, logging.StreamHandler):
+                    continue
+                stream = getattr(handler, "stream", None)
+                replacement = original_streams.get(stream)
+                if replacement is None:
+                    continue
+                self._logging_handler_streams.append((handler, stream))
+                try:
+                    handler.setStream(replacement)
+                except ValueError:
+                    handler.stream = replacement
 
     def start(self, host: str = "127.0.0.1", port: int = 8765) -> tuple[str, int]:
         with self._lock:
@@ -341,15 +371,7 @@ class WebMonitor:
             self._snapshot["updated_at"] = time.time()
 
     def _filter_log_value(self, value: str) -> str:
-        lines = value.splitlines(keepends=True)
-        if not lines:
-            return ""
-        return "".join(line for line in lines if not self._should_skip_log_line(line))
-
-    def _should_skip_log_line(self, line: str) -> bool:
-        if "[OSC READ]" not in line:
-            return False
-        return any(line.rstrip().endswith(path) for path in IGNORED_OSC_READ_PATHS)
+        return value
 
     def update(
         self,
@@ -841,7 +863,7 @@ INDEX_HTML = """<!doctype html>
           </details>
         </section>
         <section>
-          <details>
+          <details open>
             <summary>Console Log</summary>
             <textarea class="inspect" id="logs" readonly spellcheck="false"></textarea>
           </details>
