@@ -74,11 +74,14 @@ class TeeStream:
 class WebMonitor:
     """Thread-safe runtime state served over a tiny local HTTP server."""
 
-    def __init__(self, max_log_chars: int = 200_000):
+    def __init__(self, max_log_chars: int = 200_000, max_messages: int = 80):
         self.max_log_chars = max_log_chars
+        self.max_messages = max_messages
         self._lock = threading.RLock()
         self._log_chunks: deque[str] = deque()
         self._log_chars = 0
+        self._messages: deque[dict[str, Any]] = deque()
+        self._next_message_id = 1
         self._injected_commands: deque[str] = deque()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -317,6 +320,26 @@ class WebMonitor:
             self._snapshot["updated_at"] = time.time()
             return self._injected_commands.popleft()
 
+    def append_dialogue(self, role: str, text: str) -> None:
+        cleaned_text = text.strip()
+        if not cleaned_text:
+            return
+
+        normalized_role = role if role in {"user", "assistant"} else "assistant"
+        with self._lock:
+            self._messages.append(
+                {
+                    "id": self._next_message_id,
+                    "role": normalized_role,
+                    "text": cleaned_text,
+                    "created_at": time.time(),
+                }
+            )
+            self._next_message_id += 1
+            while len(self._messages) > self.max_messages:
+                self._messages.popleft()
+            self._snapshot["updated_at"] = time.time()
+
     def _filter_log_value(self, value: str) -> str:
         lines = value.splitlines(keepends=True)
         if not lines:
@@ -369,6 +392,7 @@ class WebMonitor:
         with self._lock:
             snapshot = dict(self._snapshot)
             snapshot["logs"] = "".join(self._log_chunks)
+            snapshot["messages"] = list(self._messages)
             snapshot["uptime_seconds"] = int(time.time() - self._started_at)
             return snapshot
 
@@ -397,61 +421,272 @@ INDEX_HTML = """<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Live Stage Assistant Monitor</title>
+  <title>Live Stage Assistant</title>
   <style>
     :root {
       color-scheme: light dark;
-      --bg: #f7f7f4;
-      --panel: #ffffff;
-      --text: #1f2528;
-      --muted: #626d73;
-      --border: #d7dddf;
-      --accent: #0f6b62;
+      --bg: #f7f7f8;
+      --surface: #ffffff;
+      --surface-soft: #f1f1f3;
+      --text: #1f2328;
+      --muted: #697179;
+      --border: #d7dce0;
+      --user: #1f2328;
+      --user-text: #ffffff;
+      --assistant: #ffffff;
+      --accent: #15803d;
       --ok: #1f9d55;
       --warn: #c77900;
       --bad: #c73b3b;
       --idle: #8a9499;
+      --shadow: 0 18px 50px rgba(24, 28, 32, 0.16);
     }
     @media (prefers-color-scheme: dark) {
       :root {
-        --bg: #17191a;
-        --panel: #202426;
-        --text: #edf1f2;
-        --muted: #a8b0b4;
-        --border: #384044;
+        --bg: #181a1d;
+        --surface: #202327;
+        --surface-soft: #2a2e33;
+        --text: #edf0f2;
+        --muted: #a8b0b7;
+        --border: #3a4148;
+        --user: #eceff2;
+        --user-text: #17191b;
+        --assistant: #202327;
+        --shadow: 0 18px 60px rgba(0, 0, 0, 0.42);
       }
     }
     * { box-sizing: border-box; }
+    html, body { height: 100%; }
     body {
       margin: 0;
+      overflow: hidden;
       font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       background: var(--bg);
       color: var(--text);
     }
-    header {
+    button, textarea, input, select { font: inherit; }
+    button { cursor: pointer; }
+    button:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
+    .app-shell {
+      height: 100%;
+      display: grid;
+      grid-template-rows: auto minmax(0, 1fr) auto;
+    }
+    .topbar {
+      min-height: 58px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 16px;
-      padding: 18px 24px;
-      border-bottom: 1px solid var(--border);
-      background: var(--panel);
+      gap: 14px;
+      padding: 10px 18px;
+      border-bottom: 1px solid transparent;
+    }
+    .brand {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
     }
     h1 {
       margin: 0;
-      font-size: 20px;
+      font-size: 16px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+    .meta {
+      color: var(--muted);
+      font-size: 12px;
+      overflow-wrap: anywhere;
+    }
+    .icon-button {
+      width: 38px;
+      height: 38px;
+      min-height: 38px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 18px;
+      line-height: 1;
+    }
+    .icon-button:hover {
+      background: var(--surface-soft);
+    }
+    .chat-scroll {
+      min-height: 0;
+      overflow-y: auto;
+      padding: 22px 16px 16px;
+      scroll-behavior: smooth;
+    }
+    .messages {
+      width: min(920px, 100%);
+      min-height: 100%;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-end;
+      gap: 18px;
+    }
+    .empty-state {
+      align-self: center;
+      margin: auto 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+    .message-row {
+      width: 100%;
+      display: flex;
+    }
+    .message-row.user {
+      justify-content: flex-end;
+    }
+    .message-row.assistant {
+      justify-content: flex-start;
+    }
+    .bubble {
+      max-width: min(74%, 720px);
+      min-width: 96px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 13px 15px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.03);
+    }
+    .message-row.user .bubble {
+      background: var(--user);
+      color: var(--user-text);
+      border-color: var(--user);
+    }
+    .message-row.assistant .bubble {
+      background: var(--assistant);
+      color: var(--text);
+    }
+    .message-row.pending .bubble {
+      opacity: 0.74;
+    }
+    .composer-wrap {
+      padding: 12px 16px 18px;
+      background: linear-gradient(to top, var(--bg) 78%, rgba(247, 247, 248, 0));
+    }
+    @media (prefers-color-scheme: dark) {
+      .composer-wrap {
+        background: linear-gradient(to top, var(--bg) 78%, rgba(24, 26, 29, 0));
+      }
+    }
+    .inject-form {
+      width: min(920px, 100%);
+      min-height: 56px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 40px;
+      gap: 8px;
+      align-items: end;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      background: var(--surface);
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+    }
+    #inject-command {
+      width: 100%;
+      max-height: 160px;
+      min-height: 38px;
+      resize: none;
+      border: 0;
+      outline: none;
+      padding: 9px 8px;
+      background: transparent;
+      color: var(--text);
+      line-height: 1.4;
+    }
+    #inject-submit {
+      width: 40px;
+      height: 40px;
+      min-height: 40px;
+      border: 0;
+      border-radius: 8px;
+      background: var(--text);
+      color: var(--bg);
+      font-size: 18px;
+      line-height: 1;
+    }
+    .overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: none;
+      background: rgba(0, 0, 0, 0.34);
+      padding: 18px;
+    }
+    .overlay.open {
+      display: grid;
+      place-items: center;
+    }
+    .settings-panel {
+      width: min(1040px, 100%);
+      height: min(840px, 100%);
+      min-height: 420px;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+    .settings-header {
+      min-height: 58px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 10px 14px 10px 18px;
+      border-bottom: 1px solid var(--border);
+    }
+    .settings-title {
+      font-size: 16px;
       font-weight: 650;
     }
-    main {
-      width: min(1180px, calc(100vw - 32px));
-      margin: 22px auto;
+    .tabs {
+      display: flex;
+      gap: 8px;
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface-soft);
+    }
+    .tab {
+      min-height: 36px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      padding: 0 12px;
+      background: transparent;
+      color: var(--muted);
+      font-weight: 650;
+    }
+    .tab.active {
+      border-color: var(--border);
+      background: var(--surface);
+      color: var(--text);
+    }
+    .tab-panel {
+      min-height: 0;
+      overflow-y: auto;
+      padding: 14px;
+      display: none;
+      gap: 12px;
+    }
+    .tab-panel.active {
       display: grid;
-      gap: 14px;
     }
     section {
       border: 1px solid var(--border);
       border-radius: 8px;
-      background: var(--panel);
+      background: var(--surface);
       overflow: hidden;
     }
     summary {
@@ -467,41 +702,6 @@ INDEX_HTML = """<!doctype html>
       grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
       gap: 10px;
     }
-    .inject-form {
-      display: grid;
-      grid-template-columns: minmax(0, 1fr) auto;
-      gap: 8px;
-      padding: 14px;
-    }
-    input, select {
-      width: 100%;
-      min-height: 38px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 0 10px;
-      background: color-mix(in srgb, var(--panel) 92%, var(--bg));
-      color: var(--text);
-      font: inherit;
-      outline: none;
-    }
-    input:focus, select:focus {
-      border-color: var(--accent);
-    }
-    button {
-      min-height: 38px;
-      border: 1px solid var(--accent);
-      border-radius: 8px;
-      padding: 0 14px;
-      background: var(--accent);
-      color: white;
-      font: inherit;
-      font-weight: 650;
-      cursor: pointer;
-    }
-    button:disabled {
-      opacity: 0.55;
-      cursor: default;
-    }
     .tile {
       min-height: 74px;
       border: 1px solid var(--border);
@@ -509,6 +709,7 @@ INDEX_HTML = """<!doctype html>
       padding: 11px;
       display: grid;
       gap: 4px;
+      background: var(--surface);
     }
     .tile-title {
       display: flex;
@@ -528,13 +729,9 @@ INDEX_HTML = """<!doctype html>
     .warn { background: var(--warn); }
     .bad { background: var(--bad); }
     .idle { background: var(--idle); }
-    .detail, .meta {
+    .detail {
       color: var(--muted);
       overflow-wrap: anywhere;
-    }
-    .meta {
-      font-size: 12px;
-      text-align: right;
     }
     .config-controls {
       display: grid;
@@ -552,18 +749,35 @@ INDEX_HTML = """<!doctype html>
       color: var(--muted);
       font-weight: 650;
     }
+    input, select {
+      width: 100%;
+      min-height: 38px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0 10px;
+      background: var(--surface-soft);
+      color: var(--text);
+      outline: none;
+    }
+    input:focus, select:focus {
+      border-color: var(--accent);
+    }
+    #llm-save {
+      min-height: 38px;
+      border: 1px solid var(--accent);
+      border-radius: 8px;
+      padding: 0 14px;
+      background: var(--accent);
+      color: white;
+      font-weight: 650;
+    }
     .config-message {
       grid-column: 1 / -1;
       min-height: 18px;
       color: var(--muted);
       overflow-wrap: anywhere;
     }
-    @media (max-width: 720px) {
-      .config-controls {
-        grid-template-columns: 1fr;
-      }
-    }
-    textarea {
+    textarea.inspect {
       display: block;
       width: 100%;
       min-height: 220px;
@@ -571,84 +785,121 @@ INDEX_HTML = """<!doctype html>
       border: 0;
       border-top: 1px solid var(--border);
       padding: 12px;
-      background: color-mix(in srgb, var(--panel) 92%, var(--bg));
+      background: var(--surface-soft);
       color: var(--text);
       font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       outline: none;
     }
     #logs { min-height: 360px; }
     #prompt { min-height: 300px; }
+    @media (max-width: 720px) {
+      .topbar { padding-inline: 12px; }
+      .bubble { max-width: 88%; }
+      .overlay { padding: 8px; }
+      .settings-panel { height: 100%; }
+      .config-controls { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
-  <header>
-    <h1>Live Stage Assistant Monitor</h1>
-    <div class="meta" id="meta">connecting...</div>
-  </header>
-  <main>
-    <section>
-      <details open>
-        <summary>Inject Command</summary>
-        <form class="inject-form" id="inject-form">
-          <input id="inject-command" autocomplete="off">
-          <button id="inject-submit" type="submit">Send</button>
-        </form>
-      </details>
-    </section>
-    <section>
-      <details open>
-        <summary>State</summary>
-        <div class="state" id="state"></div>
-      </details>
-    </section>
-    <section>
-      <details>
-        <summary>Config</summary>
-        <div class="config-controls">
-          <div class="field">
-            <label for="llm-provider">Provider</label>
-            <select id="llm-provider"></select>
-          </div>
-          <div class="field">
-            <label for="llm-model">LLM</label>
-            <select id="llm-model"></select>
-          </div>
-          <button id="llm-save" type="button">Save</button>
-          <div class="field">
-            <label for="elevenlabs-voice">ElevenLabs Voice</label>
-            <select id="elevenlabs-voice"></select>
-          </div>
-          <div class="field">
-            <label for="thinking-sound">Thinking Sound</label>
-            <select id="thinking-sound"></select>
-          </div>
-          <div class="config-message" id="llm-message"></div>
-        </div>
-        <textarea id="config" readonly spellcheck="false"></textarea>
-      </details>
-    </section>
-    <section>
-      <details open>
-        <summary>Console Log</summary>
-        <textarea id="logs" readonly spellcheck="false"></textarea>
-      </details>
-    </section>
-    <section>
-      <details>
-        <summary>Prompt</summary>
-        <textarea id="prompt" readonly spellcheck="false"></textarea>
-      </details>
-    </section>
-  </main>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <h1>Live Stage Assistant</h1>
+        <div class="meta" id="meta">connecting...</div>
+      </div>
+      <button class="icon-button" id="settings-open" type="button" title="Settings" aria-label="Settings">&#9881;</button>
+    </header>
+
+    <main class="chat-scroll" id="chat-scroll">
+      <div class="messages" id="messages"></div>
+    </main>
+
+    <div class="composer-wrap">
+      <form class="inject-form" id="inject-form">
+        <textarea id="inject-command" rows="1" autocomplete="off" placeholder="Message"></textarea>
+        <button id="inject-submit" type="submit" title="Send" aria-label="Send">&#8593;</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="overlay" id="settings-overlay" aria-hidden="true">
+    <div class="settings-panel" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="settings-header">
+        <div class="settings-title" id="settings-title">Settings</div>
+        <button class="icon-button" id="settings-close" type="button" title="Close" aria-label="Close">&times;</button>
+      </div>
+      <div class="tabs" role="tablist">
+        <button class="tab active" id="tab-monitor" type="button" role="tab" aria-selected="true" aria-controls="panel-monitor">Monitor</button>
+        <button class="tab" id="tab-config" type="button" role="tab" aria-selected="false" aria-controls="panel-config">Config</button>
+      </div>
+      <div class="tab-panel active" id="panel-monitor" role="tabpanel" aria-labelledby="tab-monitor">
+        <section>
+          <details open>
+            <summary>State</summary>
+            <div class="state" id="state"></div>
+          </details>
+        </section>
+        <section>
+          <details>
+            <summary>Console Log</summary>
+            <textarea class="inspect" id="logs" readonly spellcheck="false"></textarea>
+          </details>
+        </section>
+        <section>
+          <details>
+            <summary>Prompt</summary>
+            <textarea class="inspect" id="prompt" readonly spellcheck="false"></textarea>
+          </details>
+        </section>
+      </div>
+      <div class="tab-panel" id="panel-config" role="tabpanel" aria-labelledby="tab-config">
+        <section>
+          <details open>
+            <summary>Config</summary>
+            <div class="config-controls">
+              <div class="field">
+                <label for="llm-provider">Provider</label>
+                <select id="llm-provider"></select>
+              </div>
+              <div class="field">
+                <label for="llm-model">LLM</label>
+                <select id="llm-model"></select>
+              </div>
+              <button id="llm-save" type="button">Save</button>
+              <div class="field">
+                <label for="elevenlabs-voice">ElevenLabs Voice</label>
+                <select id="elevenlabs-voice"></select>
+              </div>
+              <div class="field">
+                <label for="thinking-sound">Thinking Sound</label>
+                <select id="thinking-sound"></select>
+              </div>
+              <div class="config-message" id="llm-message"></div>
+            </div>
+            <textarea class="inspect" id="config" readonly spellcheck="false"></textarea>
+          </details>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <script>
     const stateEl = document.querySelector("#state");
     const configEl = document.querySelector("#config");
     const logsEl = document.querySelector("#logs");
     const promptEl = document.querySelector("#prompt");
     const metaEl = document.querySelector("#meta");
+    const messagesEl = document.querySelector("#messages");
+    const chatScroll = document.querySelector("#chat-scroll");
     const injectForm = document.querySelector("#inject-form");
     const injectCommand = document.querySelector("#inject-command");
     const injectSubmit = document.querySelector("#inject-submit");
+    const settingsOpen = document.querySelector("#settings-open");
+    const settingsClose = document.querySelector("#settings-close");
+    const settingsOverlay = document.querySelector("#settings-overlay");
+    const tabs = Array.from(document.querySelectorAll(".tab"));
+    const panels = Array.from(document.querySelectorAll(".tab-panel"));
     const llmProvider = document.querySelector("#llm-provider");
     const llmModel = document.querySelector("#llm-model");
     const elevenlabsVoice = document.querySelector("#elevenlabs-voice");
@@ -657,6 +908,17 @@ INDEX_HTML = """<!doctype html>
     const llmMessage = document.querySelector("#llm-message");
     let llmControlsInitialized = false;
     let llmOptionsLoading = false;
+    let lastServerMessages = [];
+    let pendingMessages = [];
+
+    function escapeHtml(value) {
+      return String(value || "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
 
     function ledClass(status) {
       const value = String(status || "unknown").toLowerCase();
@@ -668,10 +930,39 @@ INDEX_HTML = """<!doctype html>
 
     function tile(title, status, detail) {
       return `<div class="tile">
-        <div class="tile-title"><span class="led ${ledClass(status)}"></span><span>${title}</span></div>
-        <div>${status || "unknown"}</div>
-        <div class="detail">${detail || ""}</div>
+        <div class="tile-title"><span class="led ${ledClass(status)}"></span><span>${escapeHtml(title)}</span></div>
+        <div>${escapeHtml(status || "unknown")}</div>
+        <div class="detail">${escapeHtml(detail || "")}</div>
       </div>`;
+    }
+
+    function messageBubble(message) {
+      const role = message.role === "user" ? "user" : "assistant";
+      const pending = message.pending ? " pending" : "";
+      return `<div class="message-row ${role}${pending}">
+        <div class="bubble">${escapeHtml(message.text)}</div>
+      </div>`;
+    }
+
+    function renderMessages(serverMessages) {
+      const knownUserMessages = (serverMessages || []).filter((message) => message.role === "user");
+      pendingMessages = pendingMessages.filter((pending) => {
+        return !knownUserMessages.some((message) => {
+          const serverTime = Number(message.created_at || 0) * 1000;
+          return message.text === pending.text && serverTime >= pending.sentAt - 1000;
+        });
+      });
+
+      const rows = [...(serverMessages || []), ...pendingMessages];
+      const shouldStick = chatScroll.scrollTop + chatScroll.clientHeight >= chatScroll.scrollHeight - 24;
+      if (rows.length === 0) {
+        messagesEl.innerHTML = `<div class="empty-state">Live Stage Assistant</div>`;
+      } else {
+        messagesEl.innerHTML = rows.map(messageBubble).join("");
+      }
+      if (shouldStick) {
+        chatScroll.scrollTop = chatScroll.scrollHeight;
+      }
     }
 
     function option(label, value, disabled, selected) {
@@ -681,6 +972,29 @@ INDEX_HTML = """<!doctype html>
       opt.disabled = Boolean(disabled);
       opt.selected = Boolean(selected);
       return opt;
+    }
+
+    function autoSizeComposer() {
+      injectCommand.style.height = "0px";
+      injectCommand.style.height = `${Math.min(injectCommand.scrollHeight, 160)}px`;
+    }
+
+    function setSettingsOpen(open) {
+      settingsOverlay.classList.toggle("open", open);
+      settingsOverlay.setAttribute("aria-hidden", open ? "false" : "true");
+      if (open) settingsClose.focus();
+      else settingsOpen.focus();
+    }
+
+    function activateTab(tabId) {
+      for (const tab of tabs) {
+        const active = tab.id === tabId;
+        tab.classList.toggle("active", active);
+        tab.setAttribute("aria-selected", active ? "true" : "false");
+      }
+      for (const panel of panels) {
+        panel.classList.toggle("active", panel.getAttribute("aria-labelledby") === tabId);
+      }
     }
 
     async function loadLlmOptions(provider, preferredModel) {
@@ -791,6 +1105,8 @@ INDEX_HTML = """<!doctype html>
         const shouldStick = logsEl.scrollTop + logsEl.clientHeight >= logsEl.scrollHeight - 8;
         logsEl.value = data.logs || "";
         if (shouldStick) logsEl.scrollTop = logsEl.scrollHeight;
+        lastServerMessages = data.messages || [];
+        renderMessages(lastServerMessages);
         const updated = data.updated_at ? new Date(data.updated_at * 1000).toLocaleTimeString() : "unknown";
         metaEl.textContent = `updated ${updated} · uptime ${data.uptime_seconds || 0}s`;
       } catch (error) {
@@ -801,12 +1117,28 @@ INDEX_HTML = """<!doctype html>
     refresh();
     setInterval(refresh, 1500);
 
+    injectCommand.addEventListener("input", autoSizeComposer);
+    injectCommand.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        injectForm.requestSubmit();
+      }
+    });
+
     injectForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const command = injectCommand.value.trim();
       if (!command) return;
 
       injectSubmit.disabled = true;
+      pendingMessages.push({
+        id: `pending-${Date.now()}`,
+        role: "user",
+        text: command,
+        pending: true,
+        sentAt: Date.now()
+      });
+      renderMessages(lastServerMessages);
       try {
         const response = await fetch("/api/inject-command", {
           method: "POST",
@@ -815,6 +1147,7 @@ INDEX_HTML = """<!doctype html>
         });
         if (!response.ok) throw new Error(await response.text());
         injectCommand.value = "";
+        autoSizeComposer();
         await refresh();
       } catch (error) {
         metaEl.textContent = `inject failed: ${error}`;
@@ -823,6 +1156,20 @@ INDEX_HTML = """<!doctype html>
         injectCommand.focus();
       }
     });
+
+    settingsOpen.addEventListener("click", () => setSettingsOpen(true));
+    settingsClose.addEventListener("click", () => setSettingsOpen(false));
+    settingsOverlay.addEventListener("click", (event) => {
+      if (event.target === settingsOverlay) setSettingsOpen(false);
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && settingsOverlay.classList.contains("open")) {
+        setSettingsOpen(false);
+      }
+    });
+    for (const tab of tabs) {
+      tab.addEventListener("click", () => activateTab(tab.id));
+    }
 
     llmProvider.addEventListener("change", () => {
       loadLlmOptions(llmProvider.value, "");

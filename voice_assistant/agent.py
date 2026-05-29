@@ -1253,6 +1253,8 @@ class VoiceAssistant:
     async def process_command(self, text: str) -> str:
         """Process user command with MCP agent."""
         print(f"\nYou said: {text}")
+        if self.web_monitor:
+            self.web_monitor.append_dialogue("user", text)
 
         # Special commands
         if text.lower() in ["exit", "quit", "goodbye"]:
@@ -1386,6 +1388,8 @@ class VoiceAssistant:
                     return "reload"
 
                 print(f"\nAssistant: {response}")
+                if self.web_monitor:
+                    self.web_monitor.append_dialogue("assistant", response)
 
                 # Check for exit
                 if text.lower() in ["exit", "quit", "goodbye"]:
