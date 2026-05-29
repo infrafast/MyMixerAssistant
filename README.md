@@ -258,6 +258,9 @@ WEB_AUDIO_ENABLED=false                        # Optional browser mic/speaker mo
 WEB_STT_PROVIDER=openai
 WEB_STT_MODEL=whisper-1
 WEB_RECORDING_MAX_SECONDS=8                    # Browser mic auto-stop duration
+WEB_CONVERSATION_SILENCE_MS=900                # Browser conversation mode end-of-utterance silence
+WEB_CONVERSATION_IDLE_SECONDS=25               # Restart the listener if no speech is detected
+WEB_CONVERSATION_THRESHOLD=0.035               # Browser-side RMS speech threshold
 WEB_TTS_PROVIDER=openai
 WEB_TTS_MODEL=gpt-4o-mini-tts
 WEB_TTS_VOICE=alloy
@@ -345,12 +348,17 @@ WEB_AUDIO_ENABLED=true
 WEB_STT_PROVIDER=openai
 WEB_STT_MODEL=whisper-1
 WEB_RECORDING_MAX_SECONDS=8
+WEB_CONVERSATION_SILENCE_MS=900
+WEB_CONVERSATION_IDLE_SECONDS=25
+WEB_CONVERSATION_THRESHOLD=0.035
 WEB_TTS_PROVIDER=openai
 WEB_TTS_MODEL=gpt-4o-mini-tts
 WEB_TTS_VOICE=alloy
 ```
 
-The browser microphone path requires browser microphone permission and a browser that supports `MediaRecorder`. Depending on the browser, microphone access may require HTTPS when the monitor is opened from another machine over the LAN. Recording starts when the microphone button is pressed, stops when the square button is pressed again, and auto-stops after `WEB_RECORDING_MAX_SECONDS` to avoid accidental endless recordings.
+The browser microphone path requires browser microphone permission and a browser that supports `MediaRecorder`. Depending on the browser, microphone access may require HTTPS when the monitor is opened from another machine over the LAN. Push-to-talk recording starts when the microphone button is pressed, stops when the square button is pressed again, stops automatically after end-of-speech silence, and still has `WEB_RECORDING_MAX_SECONDS` as a hard timeout to avoid accidental endless recordings.
+
+The conversation button next to the microphone enables continuous browser listening. In this mode the push-to-talk button is disabled, the browser detects speech/silence locally, sends each detected utterance to the backend, and then restarts listening after the assistant is done. If `WAKE_WORD` is configured, conversation-mode transcriptions must pass the same wake-word gate before being injected. Manual push-to-talk remains direct command input and does not require the wake word.
 
 Backend TTS has priority over web TTS. If `TTS_PROVIDER` is `elevenlabs` or `pyttsx3`, the monitor still allows browser STT, but web TTS is disabled to avoid double audio. To let the browser play assistant responses, set `TTS_PROVIDER=none` and enable `WEB_AUDIO_ENABLED=true` with `WEB_TTS_PROVIDER=openai`.
 

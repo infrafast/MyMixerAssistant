@@ -93,7 +93,7 @@ class WebMonitor:
         self._logging_handler_streams: list[tuple[logging.StreamHandler, TextIO]] = []
         self._llm_options_handler: Callable[[str | None], dict[str, Any]] | None = None
         self._llm_config_save_handler: Callable[[str, str, str, str], dict[str, Any]] | None = None
-        self._web_audio_transcribe_handler: Callable[[bytes, str], dict[str, Any]] | None = None
+        self._web_audio_transcribe_handler: Callable[[bytes, str, bool], dict[str, Any]] | None = None
         self._web_audio_tts_handler: Callable[[str], dict[str, Any]] | None = None
         self._started_at = time.time()
         self._snapshot: dict[str, Any] = {
@@ -123,7 +123,7 @@ class WebMonitor:
     def set_web_audio_handlers(
         self,
         *,
-        transcribe_handler: Callable[[bytes, str], dict[str, Any]] | None = None,
+        transcribe_handler: Callable[[bytes, str, bool], dict[str, Any]] | None = None,
         tts_handler: Callable[[str], dict[str, Any]] | None = None,
     ) -> None:
         """Register callbacks used by the web UI for optional browser audio."""
@@ -339,8 +339,10 @@ class WebMonitor:
                         self.send_error(400, "audio_base64 is invalid")
                         return
 
+                    apply_wake_word_gate = bool(payload.get("apply_wake_word"))
+
                     try:
-                        result = handler(audio_bytes, mime_type)
+                        result = handler(audio_bytes, mime_type, apply_wake_word_gate)
                     except ValueError as e:
                         self.send_error(400, str(e))
                         return
@@ -749,7 +751,7 @@ INDEX_HTML = """<!doctype html>
       min-height: 56px;
       margin: 0 auto;
       display: grid;
-      grid-template-columns: 40px minmax(0, 1fr) 40px;
+      grid-template-columns: 40px 40px minmax(0, 1fr) 40px;
       gap: 8px;
       align-items: end;
       border: 1px solid var(--border);
@@ -785,7 +787,8 @@ INDEX_HTML = """<!doctype html>
       font-size: 18px;
       line-height: 1;
     }
-    #web-mic {
+    #web-mic,
+    #web-conversation {
       width: 40px;
       height: 40px;
       min-height: 40px;
@@ -796,11 +799,17 @@ INDEX_HTML = """<!doctype html>
       font-size: 17px;
       line-height: 1;
     }
+    #web-conversation.active {
+      border-color: var(--accent);
+      color: var(--accent);
+      background: color-mix(in srgb, var(--accent) 12%, var(--surface-soft));
+    }
     #web-mic.recording {
       border-color: var(--bad);
       color: var(--bad);
     }
-    #web-mic:disabled {
+    #web-mic:disabled,
+    #web-conversation:disabled {
       color: var(--muted);
       cursor: not-allowed;
       opacity: 0.55;
@@ -1018,6 +1027,7 @@ INDEX_HTML = """<!doctype html>
 
     <div class="composer-wrap">
       <form class="inject-form" id="inject-form">
+        <button id="web-conversation" type="button" title="Conversation mode" aria-label="Conversation mode" disabled>&#8734;</button>
         <button id="web-mic" type="button" title="Voice input" aria-label="Voice input" disabled>&#9679;</button>
         <textarea id="inject-command" rows="1" autocomplete="off" placeholder="Message"></textarea>
         <button id="inject-submit" type="submit" title="Send" aria-label="Send">&#8593;</button>
@@ -1097,6 +1107,7 @@ INDEX_HTML = """<!doctype html>
     const injectForm = document.querySelector("#inject-form");
     const injectCommand = document.querySelector("#inject-command");
     const injectSubmit = document.querySelector("#inject-submit");
+    const webConversation = document.querySelector("#web-conversation");
     const webMic = document.querySelector("#web-mic");
     const settingsOpen = document.querySelector("#settings-open");
     const settingsClose = document.querySelector("#settings-close");
@@ -1121,7 +1132,26 @@ INDEX_HTML = """<!doctype html>
     let recordedChunks = [];
     let isRecording = false;
     let recordingTimer = null;
+    let recordingAudioContext = null;
+    let recordingAnalyser = null;
+    let recordingMonitorId = null;
+    let recordingSpeechDetected = false;
+    let recordingSilenceStartedAt = null;
+    let recordingStartedAt = 0;
+    let conversationEnabled = false;
+    let conversationRecorder = null;
+    let conversationStream = null;
+    let conversationAudioContext = null;
+    let conversationAnalyser = null;
+    let conversationChunks = [];
+    let conversationMonitorId = null;
+    let conversationSpeechDetected = false;
+    let conversationSilenceStartedAt = null;
+    let conversationStartedAt = 0;
+    let conversationRestartTimer = null;
+    let conversationDiscard = false;
     let lastSpokenAssistantMessageId = null;
+    let webTtsPlaying = false;
 
     function escapeHtml(value) {
       return String(value || "")
@@ -1173,7 +1203,8 @@ INDEX_HTML = """<!doctype html>
       composerLocked = Boolean(locked);
       injectCommand.disabled = composerLocked;
       injectSubmit.disabled = cancelRequestInFlight;
-      webMic.disabled = composerLocked || !webAudio.stt_enabled || isRecording;
+      webConversation.disabled = !webAudio.stt_enabled;
+      webMic.disabled = composerLocked || !webAudio.stt_enabled || isRecording || conversationEnabled;
       injectSubmit.classList.toggle("stop-mode", composerLocked);
       injectSubmit.innerHTML = composerLocked ? "&#9632;" : "&#8593;";
       injectSubmit.title = composerLocked ? "Stop" : "Send";
@@ -1190,8 +1221,16 @@ INDEX_HTML = """<!doctype html>
       webMic.innerHTML = isRecording ? "&#9632;" : "&#9679;";
       webMic.title = isRecording ? "Stop recording" : "Voice input";
       webMic.setAttribute("aria-label", isRecording ? "Stop recording" : "Voice input");
-      webMic.disabled = composerLocked || !webAudio.stt_enabled;
+      webMic.disabled = (composerLocked && !isRecording) || !webAudio.stt_enabled || conversationEnabled;
       injectCommand.placeholder = isRecording ? "Recording..." : (composerLocked ? "Assistant is thinking..." : "Message");
+    }
+
+    function updateConversationButton() {
+      webConversation.classList.toggle("active", conversationEnabled);
+      webConversation.title = conversationEnabled ? "Stop conversation mode" : "Conversation mode";
+      webConversation.setAttribute("aria-label", conversationEnabled ? "Stop conversation mode" : "Conversation mode");
+      webConversation.disabled = !webAudio.stt_enabled;
+      webMic.disabled = (composerLocked && !isRecording) || !webAudio.stt_enabled || conversationEnabled;
     }
 
     function clearRecordingTimer() {
@@ -1215,12 +1254,37 @@ INDEX_HTML = """<!doctype html>
 
     function stopMediaStream() {
       clearRecordingTimer();
+      if (recordingMonitorId) {
+        window.cancelAnimationFrame(recordingMonitorId);
+        recordingMonitorId = null;
+      }
+      if (recordingAudioContext) {
+        recordingAudioContext.close().catch(() => {});
+        recordingAudioContext = null;
+      }
       if (mediaStream) {
         for (const track of mediaStream.getTracks()) {
           track.stop();
         }
       }
       mediaStream = null;
+      recordingAnalyser = null;
+    }
+
+    function analyserRms(analyser) {
+      if (!analyser) return 0;
+      const data = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(data);
+      let sum = 0;
+      for (const value of data) {
+        const centered = (value - 128) / 128;
+        sum += centered * centered;
+      }
+      return Math.sqrt(sum / data.length);
+    }
+
+    function recordingRms() {
+      return analyserRms(recordingAnalyser);
     }
 
     async function submitCommand(command) {
@@ -1254,7 +1318,7 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
-    async function handleRecordedAudio(blob) {
+    async function handleRecordedAudio(blob, options = {}) {
       if (!blob || blob.size === 0) return;
       webMic.disabled = true;
       injectCommand.placeholder = "Transcribing...";
@@ -1263,15 +1327,26 @@ INDEX_HTML = """<!doctype html>
         const response = await fetch("/api/web-transcribe", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ audio_base64: audioBase64, mime_type: blob.type || "audio/webm" })
+          body: JSON.stringify({
+            audio_base64: audioBase64,
+            mime_type: blob.type || "audio/webm",
+            apply_wake_word: Boolean(options.applyWakeWord)
+          })
         });
         if (!response.ok) throw new Error(await response.text());
         const data = await response.json();
-        const text = String(data.text || "").trim();
+        if (data.accepted === false) {
+          metaEl.textContent = data.message || "voice ignored";
+          if (options.conversation) scheduleConversationRestart();
+          return;
+        }
+        const text = String(data.command_text || data.text || "").trim();
         if (text) {
-          injectCommand.value = text;
+          if (!options.conversation) injectCommand.value = text;
           autoSizeComposer();
           await submitCommand(text);
+        } else if (options.conversation) {
+          scheduleConversationRestart();
         }
       } catch (error) {
         metaEl.textContent = `voice input failed: ${error}`;
@@ -1282,6 +1357,7 @@ INDEX_HTML = """<!doctype html>
 
     async function startWebRecording() {
       if (!webAudio.stt_enabled || composerLocked || isRecording) return;
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
         metaEl.textContent = "voice input unavailable in this browser";
         return;
@@ -1289,7 +1365,17 @@ INDEX_HTML = """<!doctype html>
 
       try {
         recordedChunks = [];
+        recordingSpeechDetected = false;
+        recordingSilenceStartedAt = null;
+        recordingStartedAt = Date.now();
         mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (AudioContextClass) {
+          recordingAudioContext = new AudioContextClass();
+          const source = recordingAudioContext.createMediaStreamSource(mediaStream);
+          recordingAnalyser = recordingAudioContext.createAnalyser();
+          recordingAnalyser.fftSize = 2048;
+          source.connect(recordingAnalyser);
+        }
         mediaRecorder = new MediaRecorder(mediaStream);
         mediaRecorder.addEventListener("dataavailable", (event) => {
           if (event.data && event.data.size > 0) recordedChunks.push(event.data);
@@ -1304,6 +1390,7 @@ INDEX_HTML = """<!doctype html>
         setRecording(true);
         const maxRecordingMs = Math.max(1000, Number(webAudio.max_record_seconds || 8) * 1000);
         recordingTimer = window.setTimeout(() => stopWebRecording(), maxRecordingMs);
+        monitorPushToTalkAudio();
       } catch (error) {
         stopMediaStream();
         setRecording(false);
@@ -1319,9 +1406,169 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    function monitorPushToTalkAudio() {
+      if (!mediaRecorder || mediaRecorder.state === "inactive" || !recordingAnalyser) return;
+      const now = Date.now();
+      const rms = recordingRms();
+      const threshold = Number(webAudio.conversation_threshold || 0.035);
+      const silenceMs = Math.max(250, Number(webAudio.conversation_silence_ms || 900));
+
+      if (rms > threshold) {
+        recordingSpeechDetected = true;
+        recordingSilenceStartedAt = null;
+      } else if (recordingSpeechDetected) {
+        if (!recordingSilenceStartedAt) recordingSilenceStartedAt = now;
+        if (now - recordingSilenceStartedAt >= silenceMs) {
+          stopWebRecording();
+          return;
+        }
+      }
+
+      recordingMonitorId = window.requestAnimationFrame(monitorPushToTalkAudio);
+    }
+
+    function clearConversationRestartTimer() {
+      if (conversationRestartTimer) {
+        window.clearTimeout(conversationRestartTimer);
+        conversationRestartTimer = null;
+      }
+    }
+
+    function conversationRms() {
+      return analyserRms(conversationAnalyser);
+    }
+
+    function stopConversationStream() {
+      if (conversationMonitorId) {
+        window.cancelAnimationFrame(conversationMonitorId);
+        conversationMonitorId = null;
+      }
+      if (conversationAudioContext) {
+        conversationAudioContext.close().catch(() => {});
+        conversationAudioContext = null;
+      }
+      if (conversationStream) {
+        for (const track of conversationStream.getTracks()) {
+          track.stop();
+        }
+      }
+      conversationStream = null;
+      conversationAnalyser = null;
+      conversationRecorder = null;
+    }
+
+    function stopConversationRecording(discard = false) {
+      conversationDiscard = discard;
+      if (conversationRecorder && conversationRecorder.state !== "inactive") {
+        conversationRecorder.stop();
+      } else {
+        stopConversationStream();
+      }
+    }
+
+    async function startConversationListening() {
+      if (!conversationEnabled || composerLocked || webTtsPlaying || !webAudio.stt_enabled || conversationRecorder) return;
+      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder || !AudioContextClass) {
+        metaEl.textContent = "conversation mode unavailable in this browser";
+        conversationEnabled = false;
+        updateConversationButton();
+        return;
+      }
+
+      try {
+        conversationChunks = [];
+        conversationSpeechDetected = false;
+        conversationSilenceStartedAt = null;
+        conversationDiscard = false;
+        conversationStartedAt = Date.now();
+        conversationStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        conversationAudioContext = new AudioContextClass();
+        const source = conversationAudioContext.createMediaStreamSource(conversationStream);
+        conversationAnalyser = conversationAudioContext.createAnalyser();
+        conversationAnalyser.fftSize = 2048;
+        source.connect(conversationAnalyser);
+        conversationRecorder = new MediaRecorder(conversationStream);
+        conversationRecorder.addEventListener("dataavailable", (event) => {
+          if (event.data && event.data.size > 0) conversationChunks.push(event.data);
+        });
+        conversationRecorder.addEventListener("stop", () => {
+          const shouldDiscard = conversationDiscard || !conversationSpeechDetected;
+          const blob = new Blob(conversationChunks, { type: conversationRecorder.mimeType || "audio/webm" });
+          stopConversationStream();
+          if (!shouldDiscard) {
+            handleRecordedAudio(blob, { applyWakeWord: true, conversation: true }).finally(() => {
+              scheduleConversationRestart();
+            });
+          } else {
+            scheduleConversationRestart();
+          }
+        });
+        conversationRecorder.start();
+        monitorConversationAudio();
+        metaEl.textContent = "conversation listening...";
+      } catch (error) {
+        stopConversationStream();
+        metaEl.textContent = `conversation microphone unavailable: ${error}`;
+        scheduleConversationRestart(1500);
+      }
+    }
+
+    function monitorConversationAudio() {
+      if (!conversationRecorder || conversationRecorder.state === "inactive") return;
+      const now = Date.now();
+      const rms = conversationRms();
+      const threshold = Number(webAudio.conversation_threshold || 0.035);
+      const silenceMs = Math.max(250, Number(webAudio.conversation_silence_ms || 900));
+      const maxRecordMs = Math.max(1000, Number(webAudio.max_record_seconds || 8) * 1000);
+      const maxIdleMs = Math.max(3000, Number(webAudio.conversation_idle_seconds || 25) * 1000);
+
+      if (rms > threshold) {
+        conversationSpeechDetected = true;
+        conversationSilenceStartedAt = null;
+      } else if (conversationSpeechDetected) {
+        if (!conversationSilenceStartedAt) conversationSilenceStartedAt = now;
+        if (now - conversationSilenceStartedAt >= silenceMs) {
+          stopConversationRecording(false);
+          return;
+        }
+      }
+
+      if (conversationSpeechDetected && now - conversationStartedAt >= maxRecordMs) {
+        stopConversationRecording(false);
+        return;
+      }
+      if (!conversationSpeechDetected && now - conversationStartedAt >= maxIdleMs) {
+        stopConversationRecording(true);
+        return;
+      }
+
+      conversationMonitorId = window.requestAnimationFrame(monitorConversationAudio);
+    }
+
+    function scheduleConversationRestart(delayMs = 250) {
+      clearConversationRestartTimer();
+      if (!conversationEnabled) return;
+      if (composerLocked || webTtsPlaying) return;
+      conversationRestartTimer = window.setTimeout(() => startConversationListening(), delayMs);
+    }
+
+    function setConversationEnabled(enabled) {
+      conversationEnabled = Boolean(enabled);
+      updateConversationButton();
+      if (conversationEnabled) {
+        if (isRecording) stopWebRecording();
+        scheduleConversationRestart(0);
+      } else {
+        clearConversationRestartTimer();
+        stopConversationRecording(true);
+      }
+    }
+
     async function playWebTts(text) {
       if (!webAudio.tts_enabled || !text) return;
       try {
+        webTtsPlaying = true;
         const response = await fetch("/api/web-tts", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1331,9 +1578,16 @@ INDEX_HTML = """<!doctype html>
         const data = await response.json();
         if (!data.audio_base64 || !data.mime_type) return;
         const audio = new Audio(`data:${data.mime_type};base64,${data.audio_base64}`);
-        await audio.play();
+        await new Promise((resolve, reject) => {
+          audio.addEventListener("ended", resolve, { once: true });
+          audio.addEventListener("error", reject, { once: true });
+          audio.play().catch(reject);
+        });
       } catch (error) {
         metaEl.textContent = `web TTS unavailable: ${error}`;
+      } finally {
+        webTtsPlaying = false;
+        scheduleConversationRestart(250);
       }
     }
 
@@ -1521,6 +1775,10 @@ INDEX_HTML = """<!doctype html>
         logsEl.value = data.logs || "";
         if (shouldStick) logsEl.scrollTop = logsEl.scrollHeight;
         webAudio = data.web_audio || { enabled: false, stt_enabled: false, tts_enabled: false };
+        if (!webAudio.stt_enabled && conversationEnabled) {
+          setConversationEnabled(false);
+        }
+        updateConversationButton();
         lastServerMessages = data.messages || [];
         const serverBusy = Boolean(data.assistant_busy);
         const showThinking = serverBusy || pendingMessages.length > 0;
@@ -1536,6 +1794,11 @@ INDEX_HTML = """<!doctype html>
         ) {
           lastSpokenAssistantMessageId = latestAssistantMessage.id;
           playWebTts(latestAssistantMessage.text || "");
+        } else if (previousBusy && !showThinking && conversationEnabled) {
+          const delay = webAudio.tts_blocked_by_backend && latestAssistantMessage
+            ? Math.min(10000, 1200 + String(latestAssistantMessage.text || "").length * 55)
+            : 250;
+          scheduleConversationRestart(delay);
         }
         const updated = data.updated_at ? new Date(data.updated_at * 1000).toLocaleTimeString() : "unknown";
         metaEl.textContent = `updated ${updated} · uptime ${data.uptime_seconds || 0}s`;
@@ -1578,6 +1841,10 @@ INDEX_HTML = """<!doctype html>
       } else {
         await startWebRecording();
       }
+    });
+
+    webConversation.addEventListener("click", () => {
+      setConversationEnabled(!conversationEnabled);
     });
 
     settingsOpen.addEventListener("click", () => setSettingsOpen(true));

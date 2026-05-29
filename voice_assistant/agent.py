@@ -1304,6 +1304,36 @@ class VoiceAssistant:
         text = response.text.strip()
         return self.normalize_stt_command_text(text) if text else None
 
+    def web_audio_transcription_result(
+        self,
+        audio_data: bytes,
+        mime_type: str,
+        model: str = "whisper-1",
+        apply_wake_word_gate: bool = False,
+    ) -> dict[str, Any]:
+        text = self.web_audio_to_text_openai(audio_data, mime_type, model=model) or ""
+        if not text:
+            return {"text": "", "accepted": False, "command_text": "", "message": "No speech detected."}
+
+        if apply_wake_word_gate and self.wake_words:
+            should_process, matched_wake_word, command_text = apply_wake_word(text, self.wake_words)
+            if not should_process:
+                return {
+                    "text": text,
+                    "accepted": False,
+                    "command_text": "",
+                    "matched_wake_word": "",
+                    "message": "Wake word not detected.",
+                }
+            return {
+                "text": text,
+                "accepted": True,
+                "command_text": command_text,
+                "matched_wake_word": matched_wake_word or "",
+            }
+
+        return {"text": text, "accepted": True, "command_text": text, "matched_wake_word": ""}
+
     def audio_to_text_local_whisper(self, audio_data: bytes) -> str | None:
         """Convert audio to text using faster-whisper locally."""
         model = self._load_local_whisper_model()
@@ -1977,6 +2007,9 @@ async def main():
         web_tts_model = os.getenv("WEB_TTS_MODEL", "gpt-4o-mini-tts").strip()
         web_stt_model = os.getenv("WEB_STT_MODEL", "whisper-1").strip()
         web_recording_max_seconds = env_float("WEB_RECORDING_MAX_SECONDS", 8.0)
+        web_conversation_silence_ms = env_int("WEB_CONVERSATION_SILENCE_MS", 900)
+        web_conversation_idle_seconds = env_float("WEB_CONVERSATION_IDLE_SECONDS", 25.0)
+        web_conversation_threshold = env_float("WEB_CONVERSATION_THRESHOLD", 0.035)
         wake_words = parse_wake_words(env_optional("WAKE_WORD"))
         system_prompt = env_optional("ASSISTANT_SYSTEM_PROMPT")
         mcp_config_path = env_optional("MCP_CONFIG")
@@ -2040,6 +2073,9 @@ async def main():
             "stt_provider": web_stt_provider if web_audio_enabled else "none",
             "tts_provider": web_tts_provider if web_audio_enabled and not backend_tts_active else "none",
             "max_record_seconds": web_recording_max_seconds,
+            "conversation_silence_ms": web_conversation_silence_ms,
+            "conversation_idle_seconds": web_conversation_idle_seconds,
+            "conversation_threshold": web_conversation_threshold,
         }
 
         mcp_config = None
@@ -2102,14 +2138,12 @@ async def main():
         if web_monitor:
             web_monitor.set_web_audio_handlers(
                 transcribe_handler=(
-                    lambda audio_bytes, mime_type, active_assistant=assistant: {
-                        "text": active_assistant.web_audio_to_text_openai(
-                            audio_bytes,
-                            mime_type,
-                            model=web_stt_model,
-                        )
-                        or ""
-                    }
+                    lambda audio_bytes, mime_type, apply_wake_word_gate, active_assistant=assistant: active_assistant.web_audio_transcription_result(
+                        audio_bytes,
+                        mime_type,
+                        model=web_stt_model,
+                        apply_wake_word_gate=apply_wake_word_gate,
+                    )
                     if web_audio_state["stt_enabled"]
                     else None
                 ),
