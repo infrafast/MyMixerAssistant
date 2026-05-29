@@ -8,6 +8,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import logging
+import mimetypes
 from pathlib import Path
 import sys
 import threading
@@ -197,6 +198,9 @@ class WebMonitor:
                     if parsed.path == "/api/llm-options":
                         self._handle_llm_options(parsed.query)
                         return
+                    if parsed.path.startswith("/assets/"):
+                        self._handle_asset(parsed.path)
+                        return
                     self.send_error(404)
 
                 def do_POST(self) -> None:
@@ -236,6 +240,32 @@ class WebMonitor:
                     self.send_header("Content-Length", str(len(encoded)))
                     self.end_headers()
                     self.wfile.write(encoded)
+
+                def _handle_asset(self, request_path: str) -> None:
+                    raw_name = request_path.removeprefix("/assets/")
+                    asset_name = Path(raw_name).name
+                    if not asset_name or asset_name != raw_name:
+                        self.send_error(404)
+                        return
+
+                    asset_path = Path("assets") / asset_name
+                    if not asset_path.is_file():
+                        self.send_error(404)
+                        return
+
+                    content_type = mimetypes.guess_type(asset_path.name)[0] or "application/octet-stream"
+                    try:
+                        data = asset_path.read_bytes()
+                    except OSError as e:
+                        self.send_error(500, f"Could not read asset: {e}")
+                        return
+
+                    self.send_response(200)
+                    self.send_header("Content-Type", content_type)
+                    self.send_header("Cache-Control", "public, max-age=3600")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
 
                 def _read_json_body(self, max_bytes: int = 16_384) -> dict[str, Any] | None:
                     try:
@@ -497,6 +527,7 @@ class WebMonitor:
         mcp_config: dict[str, Any] | None = None,
         prompt: str | None = None,
         web_audio: dict[str, Any] | None = None,
+        thinking_sound_file: str | None = None,
     ) -> None:
         with self._lock:
             if mode is not None:
@@ -524,6 +555,12 @@ class WebMonitor:
                 self._snapshot["prompt"] = prompt
             if web_audio is not None:
                 self._snapshot["web_audio"] = web_audio
+            if thinking_sound_file is not None:
+                cleaned_file = Path(thinking_sound_file).name if thinking_sound_file else ""
+                if cleaned_file:
+                    self._snapshot["thinking_sound_url"] = f"/assets/{cleaned_file}"
+                else:
+                    self._snapshot["thinking_sound_url"] = ""
             self._snapshot["updated_at"] = time.time()
 
     def snapshot(self) -> dict[str, Any]:
@@ -1152,6 +1189,9 @@ INDEX_HTML = """<!doctype html>
     let conversationDiscard = false;
     let lastSpokenAssistantMessageId = null;
     let webTtsPlaying = false;
+    let thinkingAudio = null;
+    let thinkingAudioUrl = "";
+    let thinkingAudioPlaying = false;
 
     function escapeHtml(value) {
       return String(value || "")
@@ -1591,6 +1631,32 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
+    async function startThinkingAudio() {
+      if (!thinkingAudioUrl || thinkingAudioPlaying) return;
+      try {
+        if (!thinkingAudio || thinkingAudio.src !== new URL(thinkingAudioUrl, window.location.href).href) {
+          thinkingAudio = new Audio(thinkingAudioUrl);
+          thinkingAudio.loop = true;
+          thinkingAudio.volume = 0.75;
+        }
+        thinkingAudioPlaying = true;
+        thinkingAudio.currentTime = 0;
+        await thinkingAudio.play();
+      } catch (error) {
+        thinkingAudioPlaying = false;
+      }
+    }
+
+    function stopThinkingAudio() {
+      if (!thinkingAudio) {
+        thinkingAudioPlaying = false;
+        return;
+      }
+      thinkingAudio.pause();
+      thinkingAudio.currentTime = 0;
+      thinkingAudioPlaying = false;
+    }
+
     async function cancelCommand() {
       if (!composerLocked || cancelRequestInFlight) return;
       cancelRequestInFlight = true;
@@ -1775,6 +1841,7 @@ INDEX_HTML = """<!doctype html>
         logsEl.value = data.logs || "";
         if (shouldStick) logsEl.scrollTop = logsEl.scrollHeight;
         webAudio = data.web_audio || { enabled: false, stt_enabled: false, tts_enabled: false };
+        thinkingAudioUrl = data.thinking_sound_url || "";
         if (!webAudio.stt_enabled && conversationEnabled) {
           setConversationEnabled(false);
         }
@@ -1782,6 +1849,8 @@ INDEX_HTML = """<!doctype html>
         lastServerMessages = data.messages || [];
         const serverBusy = Boolean(data.assistant_busy);
         const showThinking = serverBusy || pendingMessages.length > 0;
+        if (showThinking) startThinkingAudio();
+        else stopThinkingAudio();
         setComposerLocked(showThinking);
         renderMessages(lastServerMessages, showThinking);
         const latestAssistantMessage = [...lastServerMessages].reverse().find((message) => message.role === "assistant");

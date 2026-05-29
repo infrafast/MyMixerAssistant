@@ -2107,6 +2107,7 @@ async def main():
                     mcp_config=mcp_config,
                 ),
                 web_audio=web_audio_state,
+                thinking_sound_file=thinking_sound_file,
             )
 
         assistant = VoiceAssistant(
