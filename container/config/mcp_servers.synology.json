@@ -1,21 +1,16 @@
 {
   "mcpServers": {
-    "mixer": {
-      "command": "node",
-      "args": [
-        "/xmseries-mcp/dist/index.js"
-      ],
-      "env": {
-        "OSC_HOST": "192.168.0.1",
-        "OSC_PORT": "10023",
-        "OSC_PROTOCOL": "OSCX32M32",
-        "DEBUG": "false"
+    "xmseries-http": {
+      "type": "streamable-http",
+      "url": "http://xmseriesmcp.infrafast.fr/mcp",
+      "headers": {
+        "Authorization": "Bearer change-me"
       },
       "assistantPrompt": {
         "promptName": "xmseries_mixer_assistant",
         "resourceUri": "xmseries://prompt/system",
         "tool": "osc_get_agent_prompt"
-      }
-    }
+      }             
+    }  
   }
 }
