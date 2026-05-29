@@ -10,6 +10,7 @@ This version includes better error handling and fallback options.
 """
 
 import asyncio
+from contextlib import contextmanager
 import io
 import json
 import logging
@@ -78,6 +79,30 @@ MIXER_TARGET_RESOLUTION_RULE = (
     "resolve globally across all families. If the resolution is fuzzy, stop and ask the user to confirm the "
     "resolved target before reading or writing. Do not mention this internal rule."
 )
+
+
+@contextmanager
+def suppress_native_stderr():
+    """Temporarily silence native libraries that write directly to stderr."""
+    try:
+        sys.stderr.flush()
+        stderr_fd = sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        yield
+        return
+
+    saved_stderr_fd = None
+    try:
+        saved_stderr_fd = os.dup(stderr_fd)
+        with open(os.devnull, "w") as devnull:
+            os.dup2(devnull.fileno(), stderr_fd)
+            yield
+    finally:
+        if saved_stderr_fd is not None:
+            try:
+                os.dup2(saved_stderr_fd, stderr_fd)
+            finally:
+                os.close(saved_stderr_fd)
 CURRENT_STATE_QUERY_MARKERS = (
     "current",
     "currently",
@@ -346,10 +371,12 @@ class VoiceAssistant:
         self.wake_words = wake_words or []
 
         # Initialize audio components
-        self.audio = pyaudio.PyAudio()
+        with suppress_native_stderr():
+            self.audio = pyaudio.PyAudio()
         self.pygame_mixer_available = False
         try:
-            pygame.mixer.init()
+            with suppress_native_stderr():
+                pygame.mixer.init()
             self.pygame_mixer_available = True
         except pygame.error as e:
             print(f"Audio output unavailable for thinking sound; continuing without it: {e}")
@@ -963,13 +990,14 @@ class VoiceAssistant:
 
         stream = None
         try:
-            stream = self.audio.open(
-                format=self.audio_format,
-                channels=self.channels,
-                rate=self.rate,
-                input=True,
-                frames_per_buffer=self.chunk,
-            )
+            with suppress_native_stderr():
+                stream = self.audio.open(
+                    format=self.audio_format,
+                    channels=self.channels,
+                    rate=self.rate,
+                    input=True,
+                    frames_per_buffer=self.chunk,
+                )
 
             frames = []
             silence_frames = 0
