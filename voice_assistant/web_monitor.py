@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -91,6 +93,8 @@ class WebMonitor:
         self._logging_handler_streams: list[tuple[logging.StreamHandler, TextIO]] = []
         self._llm_options_handler: Callable[[str | None], dict[str, Any]] | None = None
         self._llm_config_save_handler: Callable[[str, str, str, str], dict[str, Any]] | None = None
+        self._web_audio_transcribe_handler: Callable[[bytes, str], dict[str, Any]] | None = None
+        self._web_audio_tts_handler: Callable[[str], dict[str, Any]] | None = None
         self._started_at = time.time()
         self._snapshot: dict[str, Any] = {
             "mode": "unknown",
@@ -101,6 +105,7 @@ class WebMonitor:
             "config_text": "{}",
             "prompt": "",
             "assistant_busy": False,
+            "web_audio": {"enabled": False, "stt_enabled": False, "tts_enabled": False},
             "updated_at": time.time(),
         }
 
@@ -114,6 +119,17 @@ class WebMonitor:
         with self._lock:
             self._llm_options_handler = options_handler
             self._llm_config_save_handler = save_handler
+
+    def set_web_audio_handlers(
+        self,
+        *,
+        transcribe_handler: Callable[[bytes, str], dict[str, Any]] | None = None,
+        tts_handler: Callable[[str], dict[str, Any]] | None = None,
+    ) -> None:
+        """Register callbacks used by the web UI for optional browser audio."""
+        with self._lock:
+            self._web_audio_transcribe_handler = transcribe_handler
+            self._web_audio_tts_handler = tts_handler
 
     def install_console_capture(self) -> None:
         with self._lock:
@@ -190,6 +206,12 @@ class WebMonitor:
                     if self.path == "/api/cancel-command":
                         self._handle_cancel_command()
                         return
+                    if self.path == "/api/web-transcribe":
+                        self._handle_web_transcribe()
+                        return
+                    if self.path == "/api/web-tts":
+                        self._handle_web_tts()
+                        return
                     if self.path == "/api/llm-config":
                         self._handle_llm_config_save()
                         return
@@ -220,8 +242,11 @@ class WebMonitor:
                         length = int(self.headers.get("Content-Length", "0"))
                     except ValueError:
                         length = 0
+                    if length > max_bytes:
+                        self.send_error(413, "Request body is too large")
+                        return None
 
-                    raw_body = self.rfile.read(min(length, max_bytes))
+                    raw_body = self.rfile.read(length)
                     try:
                         payload = json.loads(raw_body.decode("utf-8") or "{}")
                     except json.JSONDecodeError:
@@ -291,6 +316,63 @@ class WebMonitor:
                 def _handle_cancel_command(self) -> None:
                     monitor.request_cancel()
                     self._send_json({"accepted": True})
+
+                def _handle_web_transcribe(self) -> None:
+                    handler = monitor._web_audio_transcribe_handler
+                    if handler is None:
+                        self.send_error(503, "Web audio transcription is not available")
+                        return
+
+                    payload = self._read_json_body(max_bytes=16 * 1024 * 1024)
+                    if payload is None:
+                        return
+
+                    audio_base64 = str(payload.get("audio_base64") or "")
+                    mime_type = str(payload.get("mime_type") or "audio/webm").strip().lower()
+                    if not audio_base64:
+                        self.send_error(400, "audio_base64 is required")
+                        return
+
+                    try:
+                        audio_bytes = base64.b64decode(audio_base64, validate=True)
+                    except (binascii.Error, ValueError):
+                        self.send_error(400, "audio_base64 is invalid")
+                        return
+
+                    try:
+                        result = handler(audio_bytes, mime_type)
+                    except ValueError as e:
+                        self.send_error(400, str(e))
+                        return
+                    except Exception as e:
+                        self.send_error(500, f"Could not transcribe web audio: {e}")
+                        return
+                    self._send_json(result)
+
+                def _handle_web_tts(self) -> None:
+                    handler = monitor._web_audio_tts_handler
+                    if handler is None:
+                        self.send_error(503, "Web audio TTS is not available")
+                        return
+
+                    payload = self._read_json_body()
+                    if payload is None:
+                        return
+
+                    text = str(payload.get("text") or "").strip()
+                    if not text:
+                        self.send_error(400, "text is required")
+                        return
+
+                    try:
+                        result = handler(text)
+                    except ValueError as e:
+                        self.send_error(400, str(e))
+                        return
+                    except Exception as e:
+                        self.send_error(500, f"Could not generate web TTS: {e}")
+                        return
+                    self._send_json(result)
 
             self._server = ThreadingHTTPServer((host, port), MonitorHandler)
             self._thread = threading.Thread(
@@ -412,6 +494,7 @@ class WebMonitor:
         env_values: dict[str, Any] | None = None,
         mcp_config: dict[str, Any] | None = None,
         prompt: str | None = None,
+        web_audio: dict[str, Any] | None = None,
     ) -> None:
         with self._lock:
             if mode is not None:
@@ -437,6 +520,8 @@ class WebMonitor:
                 self._snapshot["config_text"] = json.dumps(config, ensure_ascii=False, indent=2)
             if prompt is not None:
                 self._snapshot["prompt"] = prompt
+            if web_audio is not None:
+                self._snapshot["web_audio"] = web_audio
             self._snapshot["updated_at"] = time.time()
 
     def snapshot(self) -> dict[str, Any]:
@@ -664,7 +749,7 @@ INDEX_HTML = """<!doctype html>
       min-height: 56px;
       margin: 0 auto;
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 40px;
+      grid-template-columns: 40px minmax(0, 1fr) 40px;
       gap: 8px;
       align-items: end;
       border: 1px solid var(--border);
@@ -699,6 +784,26 @@ INDEX_HTML = """<!doctype html>
       color: var(--bg);
       font-size: 18px;
       line-height: 1;
+    }
+    #web-mic {
+      width: 40px;
+      height: 40px;
+      min-height: 40px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--surface-soft);
+      color: var(--text);
+      font-size: 17px;
+      line-height: 1;
+    }
+    #web-mic.recording {
+      border-color: var(--bad);
+      color: var(--bad);
+    }
+    #web-mic:disabled {
+      color: var(--muted);
+      cursor: not-allowed;
+      opacity: 0.55;
     }
     #inject-submit:disabled {
       background: var(--surface-soft);
@@ -913,6 +1018,7 @@ INDEX_HTML = """<!doctype html>
 
     <div class="composer-wrap">
       <form class="inject-form" id="inject-form">
+        <button id="web-mic" type="button" title="Voice input" aria-label="Voice input" disabled>&#9679;</button>
         <textarea id="inject-command" rows="1" autocomplete="off" placeholder="Message"></textarea>
         <button id="inject-submit" type="submit" title="Send" aria-label="Send">&#8593;</button>
       </form>
@@ -991,6 +1097,7 @@ INDEX_HTML = """<!doctype html>
     const injectForm = document.querySelector("#inject-form");
     const injectCommand = document.querySelector("#inject-command");
     const injectSubmit = document.querySelector("#inject-submit");
+    const webMic = document.querySelector("#web-mic");
     const settingsOpen = document.querySelector("#settings-open");
     const settingsClose = document.querySelector("#settings-close");
     const settingsOverlay = document.querySelector("#settings-overlay");
@@ -1008,6 +1115,13 @@ INDEX_HTML = """<!doctype html>
     let pendingMessages = [];
     let composerLocked = false;
     let cancelRequestInFlight = false;
+    let webAudio = { enabled: false, stt_enabled: false, tts_enabled: false };
+    let mediaRecorder = null;
+    let mediaStream = null;
+    let recordedChunks = [];
+    let isRecording = false;
+    let recordingTimer = null;
+    let lastSpokenAssistantMessageId = null;
 
     function escapeHtml(value) {
       return String(value || "")
@@ -1059,6 +1173,7 @@ INDEX_HTML = """<!doctype html>
       composerLocked = Boolean(locked);
       injectCommand.disabled = composerLocked;
       injectSubmit.disabled = cancelRequestInFlight;
+      webMic.disabled = composerLocked || !webAudio.stt_enabled || isRecording;
       injectSubmit.classList.toggle("stop-mode", composerLocked);
       injectSubmit.innerHTML = composerLocked ? "&#9632;" : "&#8593;";
       injectSubmit.title = composerLocked ? "Stop" : "Send";
@@ -1066,6 +1181,159 @@ INDEX_HTML = """<!doctype html>
       injectCommand.placeholder = composerLocked ? "Assistant is thinking..." : "Message";
       if (wasLocked && !composerLocked && !settingsOverlay.classList.contains("open")) {
         window.setTimeout(() => injectCommand.focus({ preventScroll: true }), 0);
+      }
+    }
+
+    function setRecording(recording) {
+      isRecording = Boolean(recording);
+      webMic.classList.toggle("recording", isRecording);
+      webMic.innerHTML = isRecording ? "&#9632;" : "&#9679;";
+      webMic.title = isRecording ? "Stop recording" : "Voice input";
+      webMic.setAttribute("aria-label", isRecording ? "Stop recording" : "Voice input");
+      webMic.disabled = composerLocked || !webAudio.stt_enabled;
+      injectCommand.placeholder = isRecording ? "Recording..." : (composerLocked ? "Assistant is thinking..." : "Message");
+    }
+
+    function clearRecordingTimer() {
+      if (recordingTimer) {
+        window.clearTimeout(recordingTimer);
+        recordingTimer = null;
+      }
+    }
+
+    function blobToBase64(blob) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const result = String(reader.result || "");
+          resolve(result.includes(",") ? result.split(",").pop() : result);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(blob);
+      });
+    }
+
+    function stopMediaStream() {
+      clearRecordingTimer();
+      if (mediaStream) {
+        for (const track of mediaStream.getTracks()) {
+          track.stop();
+        }
+      }
+      mediaStream = null;
+    }
+
+    async function submitCommand(command) {
+      const cleanedCommand = command.trim();
+      if (!cleanedCommand || composerLocked) return;
+
+      pendingMessages.push({
+        id: `pending-${Date.now()}`,
+        role: "user",
+        text: cleanedCommand,
+        pending: true,
+        sentAt: Date.now()
+      });
+      setComposerLocked(true);
+      renderMessages(lastServerMessages, true);
+      try {
+        const response = await fetch("/api/inject-command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ command: cleanedCommand })
+        });
+        if (!response.ok) throw new Error(await response.text());
+        injectCommand.value = "";
+        autoSizeComposer();
+        await refresh();
+      } catch (error) {
+        pendingMessages = pendingMessages.filter((message) => message.text !== cleanedCommand);
+        setComposerLocked(false);
+        renderMessages(lastServerMessages, false);
+        metaEl.textContent = `inject failed: ${error}`;
+      }
+    }
+
+    async function handleRecordedAudio(blob) {
+      if (!blob || blob.size === 0) return;
+      webMic.disabled = true;
+      injectCommand.placeholder = "Transcribing...";
+      try {
+        const audioBase64 = await blobToBase64(blob);
+        const response = await fetch("/api/web-transcribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ audio_base64: audioBase64, mime_type: blob.type || "audio/webm" })
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const data = await response.json();
+        const text = String(data.text || "").trim();
+        if (text) {
+          injectCommand.value = text;
+          autoSizeComposer();
+          await submitCommand(text);
+        }
+      } catch (error) {
+        metaEl.textContent = `voice input failed: ${error}`;
+      } finally {
+        setRecording(false);
+      }
+    }
+
+    async function startWebRecording() {
+      if (!webAudio.stt_enabled || composerLocked || isRecording) return;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || !window.MediaRecorder) {
+        metaEl.textContent = "voice input unavailable in this browser";
+        return;
+      }
+
+      try {
+        recordedChunks = [];
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(mediaStream);
+        mediaRecorder.addEventListener("dataavailable", (event) => {
+          if (event.data && event.data.size > 0) recordedChunks.push(event.data);
+        });
+        mediaRecorder.addEventListener("stop", () => {
+          const blob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || "audio/webm" });
+          stopMediaStream();
+          injectCommand.placeholder = "Transcribing...";
+          handleRecordedAudio(blob);
+        });
+        mediaRecorder.start();
+        setRecording(true);
+        const maxRecordingMs = Math.max(1000, Number(webAudio.max_record_seconds || 8) * 1000);
+        recordingTimer = window.setTimeout(() => stopWebRecording(), maxRecordingMs);
+      } catch (error) {
+        stopMediaStream();
+        setRecording(false);
+        metaEl.textContent = `microphone unavailable: ${error}`;
+      }
+    }
+
+    function stopWebRecording() {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        clearRecordingTimer();
+        webMic.disabled = true;
+        mediaRecorder.stop();
+      }
+    }
+
+    async function playWebTts(text) {
+      if (!webAudio.tts_enabled || !text) return;
+      try {
+        const response = await fetch("/api/web-tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text })
+        });
+        if (!response.ok) throw new Error(await response.text());
+        const data = await response.json();
+        if (!data.audio_base64 || !data.mime_type) return;
+        const audio = new Audio(`data:${data.mime_type};base64,${data.audio_base64}`);
+        await audio.play();
+      } catch (error) {
+        metaEl.textContent = `web TTS unavailable: ${error}`;
       }
     }
 
@@ -1238,6 +1506,7 @@ INDEX_HTML = """<!doctype html>
       try {
         const response = await fetch("/api/snapshot", { cache: "no-store" });
         const data = await response.json();
+        const previousBusy = composerLocked;
         const services = data.services || {};
         const rows = [
           tile("Internet", data.internet, data.mode === "auto" ? "auto profile detection" : "fixed profile"),
@@ -1251,11 +1520,23 @@ INDEX_HTML = """<!doctype html>
         const shouldStick = logsEl.scrollTop + logsEl.clientHeight >= logsEl.scrollHeight - 8;
         logsEl.value = data.logs || "";
         if (shouldStick) logsEl.scrollTop = logsEl.scrollHeight;
+        webAudio = data.web_audio || { enabled: false, stt_enabled: false, tts_enabled: false };
         lastServerMessages = data.messages || [];
         const serverBusy = Boolean(data.assistant_busy);
         const showThinking = serverBusy || pendingMessages.length > 0;
         setComposerLocked(showThinking);
         renderMessages(lastServerMessages, showThinking);
+        const latestAssistantMessage = [...lastServerMessages].reverse().find((message) => message.role === "assistant");
+        if (
+          previousBusy &&
+          !showThinking &&
+          webAudio.tts_enabled &&
+          latestAssistantMessage &&
+          latestAssistantMessage.id !== lastSpokenAssistantMessageId
+        ) {
+          lastSpokenAssistantMessageId = latestAssistantMessage.id;
+          playWebTts(latestAssistantMessage.text || "");
+        }
         const updated = data.updated_at ? new Date(data.updated_at * 1000).toLocaleTimeString() : "unknown";
         metaEl.textContent = `updated ${updated} · uptime ${data.uptime_seconds || 0}s`;
       } catch (error) {
@@ -1282,38 +1563,21 @@ INDEX_HTML = """<!doctype html>
       }
       const command = injectCommand.value.trim();
       if (!command) return;
-
-      pendingMessages.push({
-        id: `pending-${Date.now()}`,
-        role: "user",
-        text: command,
-        pending: true,
-        sentAt: Date.now()
-      });
-      setComposerLocked(true);
-      renderMessages(lastServerMessages, true);
-      try {
-        const response = await fetch("/api/inject-command", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ command })
-        });
-        if (!response.ok) throw new Error(await response.text());
-        injectCommand.value = "";
-        autoSizeComposer();
-        await refresh();
-      } catch (error) {
-        pendingMessages = pendingMessages.filter((message) => message.text !== command);
-        setComposerLocked(false);
-        renderMessages(lastServerMessages, false);
-        metaEl.textContent = `inject failed: ${error}`;
-      }
+      await submitCommand(command);
     });
 
     injectSubmit.addEventListener("click", async (event) => {
       if (!composerLocked) return;
       event.preventDefault();
       await cancelCommand();
+    });
+
+    webMic.addEventListener("click", async () => {
+      if (isRecording) {
+        stopWebRecording();
+      } else {
+        await startWebRecording();
+      }
     });
 
     settingsOpen.addEventListener("click", () => setSettingsOpen(true));

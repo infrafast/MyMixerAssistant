@@ -254,6 +254,13 @@ THINKING_SOUND_FILE=thinking.wav                # WAV loop while the LLM/MCP age
 WEB_MONITOR_ENABLED=true                        # Serve chat UI, runtime state, config, logs, and final prompt
 WEB_MONITOR_HOST=127.0.0.1
 WEB_MONITOR_PORT=8765
+WEB_AUDIO_ENABLED=false                        # Optional browser mic/speaker mode proxied through the backend
+WEB_STT_PROVIDER=openai
+WEB_STT_MODEL=whisper-1
+WEB_RECORDING_MAX_SECONDS=8                    # Browser mic auto-stop duration
+WEB_TTS_PROVIDER=openai
+WEB_TTS_MODEL=gpt-4o-mini-tts
+WEB_TTS_VOICE=alloy
 
 # Optional - Assistant Configuration
 WAKE_WORD=                                      # Empty keeps current behavior; set e.g. "Mixeur" to gate commands
@@ -307,6 +314,7 @@ The web monitor is intentionally split between a clean chat surface and a techni
 - The command input stays pinned to the bottom of the page. Press Enter or the up-arrow button to send; Shift+Enter inserts a newline.
 - While the LLM/MCP agent is processing, the input is disabled and the response area shows a small thinking animation. The send arrow becomes a square stop button.
 - Pressing the stop button calls `/api/cancel-command`, cancels the active agent task, clears the busy state, and returns the assistant to listening.
+- If `WEB_AUDIO_ENABLED=true`, a browser microphone button appears in the composer. The browser records audio, sends it to the backend, the backend calls OpenAI STT, and the transcribed text is injected as a normal command.
 - The top-right settings button opens an overlay. The first tab contains **State**, **Console Log**, and **Prompt** collapsibles. The second tab contains **Config**.
 
 The monitor exposes these HTTP endpoints:
@@ -314,6 +322,8 @@ The monitor exposes these HTTP endpoints:
 - `GET /api/snapshot`: returns runtime state, logs, dialogue messages, `assistant_busy`, config, prompt, and service status.
 - `POST /api/inject-command`: queues a text command for the agent.
 - `POST /api/cancel-command`: requests cancellation of the currently processing command.
+- `POST /api/web-transcribe`: accepts browser-recorded base64 audio and returns transcribed command text when web audio is enabled.
+- `POST /api/web-tts`: returns browser-playable base64 MP3 speech when web audio TTS is enabled.
 - `GET /api/llm-options` and `POST /api/llm-config`: back the provider/model/voice/thinking-sound controls in the config tab.
 
 Dialogue and technical logs are separate. The main chat only displays user commands and assistant responses. Python `stdout`, `stderr`, and existing `logging.StreamHandler` instances are mirrored into **Settings > Monitor > Console Log**, so tool traces such as OSC read/write logs stay available without cluttering the main dialogue.
@@ -323,6 +333,28 @@ OSC log lines are no longer filtered out by the web monitor. If the terminal pri
 Injected commands are treated as direct text input after wake word handling. This means the text entered in the chat box should be the command itself, without the wake word. After the monitor accepts the command, the input is cleared. The agent logs the command as consumed before processing it.
 
 The monitor remains decoupled from the assistant logic. The web page queues text and cancellation requests; the agent remains responsible for consuming, processing, cancelling, and returning to microphone/text fallback listening. If the assistant is already inside microphone recording when a command is injected, the recording loop stops early and the queued command is consumed immediately after the microphone stream closes.
+
+#### Browser Audio Mode
+
+`WEB_AUDIO_ENABLED=false` is the default. When false, no browser microphone/TTS endpoints are exposed to the UI and the current embedded/local audio workflow remains unchanged.
+
+When `WEB_AUDIO_ENABLED=true`, browser audio is proxied through the backend so API keys are never sent to the browser:
+
+```env
+WEB_AUDIO_ENABLED=true
+WEB_STT_PROVIDER=openai
+WEB_STT_MODEL=whisper-1
+WEB_RECORDING_MAX_SECONDS=8
+WEB_TTS_PROVIDER=openai
+WEB_TTS_MODEL=gpt-4o-mini-tts
+WEB_TTS_VOICE=alloy
+```
+
+The browser microphone path requires browser microphone permission and a browser that supports `MediaRecorder`. Depending on the browser, microphone access may require HTTPS when the monitor is opened from another machine over the LAN. Recording starts when the microphone button is pressed, stops when the square button is pressed again, and auto-stops after `WEB_RECORDING_MAX_SECONDS` to avoid accidental endless recordings.
+
+Backend TTS has priority over web TTS. If `TTS_PROVIDER` is `elevenlabs` or `pyttsx3`, the monitor still allows browser STT, but web TTS is disabled to avoid double audio. To let the browser play assistant responses, set `TTS_PROVIDER=none` and enable `WEB_AUDIO_ENABLED=true` with `WEB_TTS_PROVIDER=openai`.
+
+If the backend or selected profile cannot reach OpenAI, browser audio falls back to silent text chat. The main chat input and stop button remain usable over the local network.
 
 #### Voice Cancel During Thinking
 

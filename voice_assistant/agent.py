@@ -10,6 +10,7 @@ This version includes better error handling and fallback options.
 """
 
 import asyncio
+import base64
 from contextlib import contextmanager
 import io
 import json
@@ -1270,6 +1271,39 @@ class VoiceAssistant:
             print(f"Error transcribing audio: {e}")
             return None
 
+    def web_audio_to_text_openai(
+        self,
+        audio_data: bytes,
+        mime_type: str,
+        model: str = "whisper-1",
+    ) -> str | None:
+        """Convert browser-recorded audio to text using OpenAI from the backend."""
+        if not self.openai_client:
+            raise ValueError("OpenAI client is not configured")
+        if not audio_data:
+            raise ValueError("audio data is empty")
+
+        extension = "webm"
+        if "mp4" in mime_type:
+            extension = "mp4"
+        elif "mpeg" in mime_type or "mp3" in mime_type:
+            extension = "mp3"
+        elif "ogg" in mime_type:
+            extension = "ogg"
+        elif "wav" in mime_type:
+            extension = "wav"
+
+        audio_buffer = io.BytesIO(audio_data)
+        audio_buffer.name = f"web-audio.{extension}"
+        kwargs = {"model": model, "file": audio_buffer}
+        if self.stt_language:
+            kwargs["language"] = self.stt_language
+        if self.stt_prompt:
+            kwargs["prompt"] = self.stt_prompt
+        response = self.openai_client.audio.transcriptions.create(**kwargs)
+        text = response.text.strip()
+        return self.normalize_stt_command_text(text) if text else None
+
     def audio_to_text_local_whisper(self, audio_data: bytes) -> str | None:
         """Convert audio to text using faster-whisper locally."""
         model = self._load_local_whisper_model()
@@ -1351,6 +1385,31 @@ class VoiceAssistant:
         except Exception as e:
             print(f"Local pyttsx3 TTS failed: {e}")
             return False
+
+    def web_text_to_speech_openai(
+        self,
+        text: str,
+        model: str = "gpt-4o-mini-tts",
+        voice: str = "alloy",
+    ) -> dict[str, Any]:
+        """Generate browser-playable speech using OpenAI from the backend."""
+        if not self.openai_client:
+            raise ValueError("OpenAI client is not configured")
+        cleaned_text = text.strip()
+        if not cleaned_text:
+            raise ValueError("text is required")
+
+        response = self.openai_client.audio.speech.create(
+            model=model,
+            voice=voice,
+            input=cleaned_text,
+            response_format="mp3",
+        )
+        audio_bytes = response.read()
+        return {
+            "audio_base64": base64.b64encode(audio_bytes).decode("ascii"),
+            "mime_type": "audio/mpeg",
+        }
 
     async def process_command(self, text: str) -> str:
         """Process user command with MCP agent."""
@@ -1911,6 +1970,13 @@ async def main():
         silence_threshold = env_int("VOICE_SILENCE_THRESHOLD", 500)
         silence_duration = env_float("VOICE_SILENCE_DURATION", 1.5)
         voice_cancel_during_thinking = env_bool("VOICE_CANCEL_DURING_THINKING", False)
+        web_audio_enabled = env_bool("WEB_AUDIO_ENABLED", False)
+        web_stt_provider = os.getenv("WEB_STT_PROVIDER", "openai").strip().lower()
+        web_tts_provider = os.getenv("WEB_TTS_PROVIDER", "openai").strip().lower()
+        web_tts_voice = os.getenv("WEB_TTS_VOICE", "alloy").strip()
+        web_tts_model = os.getenv("WEB_TTS_MODEL", "gpt-4o-mini-tts").strip()
+        web_stt_model = os.getenv("WEB_STT_MODEL", "whisper-1").strip()
+        web_recording_max_seconds = env_float("WEB_RECORDING_MAX_SECONDS", 8.0)
         wake_words = parse_wake_words(env_optional("WAKE_WORD"))
         system_prompt = env_optional("ASSISTANT_SYSTEM_PROMPT")
         mcp_config_path = env_optional("MCP_CONFIG")
@@ -1926,6 +1992,12 @@ async def main():
         if tts_provider not in {"elevenlabs", "pyttsx3", "none"}:
             print(f"Error: TTS_PROVIDER must be 'elevenlabs', 'pyttsx3', or 'none', got: {tts_provider}")
             sys.exit(1)
+        if web_stt_provider not in {"openai"}:
+            print(f"Error: WEB_STT_PROVIDER must be 'openai', got: {web_stt_provider}")
+            sys.exit(1)
+        if web_tts_provider not in {"openai", "none"}:
+            print(f"Error: WEB_TTS_PROVIDER must be 'openai' or 'none', got: {web_tts_provider}")
+            sys.exit(1)
         if mcp_prompt_merge_mode not in {"append", "replace"}:
             print(f"Error: MCP_PROMPT_MERGE_MODE must be 'append' or 'replace', got: {mcp_prompt_merge_mode}")
             sys.exit(1)
@@ -1938,16 +2010,37 @@ async def main():
         print(f"Using thinking sound file: {thinking_sound_file}")
         if voice_cancel_during_thinking:
             print("Using voice cancel during thinking: enabled")
+        if web_audio_enabled:
+            print(f"Using web audio: STT={web_stt_provider}, TTS={web_tts_provider}")
         print(f"Using wake word: {', '.join(wake_words) if wake_words else 'disabled'}")
         print(f"Using MCP agent memory: {mcp_agent_memory_enabled}")
 
-        if (llm_provider == "openai" or stt_provider == "openai-whisper") and not openai_api_key:
+        web_audio_needs_openai = web_audio_enabled and (
+            web_stt_provider == "openai" or web_tts_provider == "openai"
+        )
+        if (llm_provider == "openai" or stt_provider == "openai-whisper" or web_audio_needs_openai) and not openai_api_key:
             print("Error: OpenAI API key is required")
             print(
                 "Set OPENAI_API_KEY_FILE, or use an offline env file with "
                 "LLM_PROVIDER=ollama and STT_PROVIDER=local-whisper"
             )
             sys.exit(1)
+
+        backend_tts_active = tts_provider != "none"
+        web_audio_state = {
+            "enabled": web_audio_enabled,
+            "stt_enabled": web_audio_enabled and web_stt_provider == "openai" and bool(openai_api_key),
+            "tts_enabled": (
+                web_audio_enabled
+                and web_tts_provider == "openai"
+                and bool(openai_api_key)
+                and not backend_tts_active
+            ),
+            "tts_blocked_by_backend": web_audio_enabled and backend_tts_active,
+            "stt_provider": web_stt_provider if web_audio_enabled else "none",
+            "tts_provider": web_tts_provider if web_audio_enabled and not backend_tts_active else "none",
+            "max_record_seconds": web_recording_max_seconds,
+        }
 
         mcp_config = None
         if mcp_config_path:
@@ -1977,9 +2070,10 @@ async def main():
                     tts_provider=tts_provider,
                     mcp_config=mcp_config,
                 ),
+                web_audio=web_audio_state,
             )
 
-        return VoiceAssistant(
+        assistant = VoiceAssistant(
             openai_api_key=openai_api_key,
             elevenlabs_api_key=elevenlabs_api_key,
             model=model,
@@ -2004,6 +2098,33 @@ async def main():
             reload_event=reload_event,
             web_monitor=web_monitor,
         )
+
+        if web_monitor:
+            web_monitor.set_web_audio_handlers(
+                transcribe_handler=(
+                    lambda audio_bytes, mime_type, active_assistant=assistant: {
+                        "text": active_assistant.web_audio_to_text_openai(
+                            audio_bytes,
+                            mime_type,
+                            model=web_stt_model,
+                        )
+                        or ""
+                    }
+                    if web_audio_state["stt_enabled"]
+                    else None
+                ),
+                tts_handler=(
+                    lambda text, active_assistant=assistant: active_assistant.web_text_to_speech_openai(
+                        text,
+                        model=web_tts_model,
+                        voice=web_tts_voice,
+                    )
+                    if web_audio_state["tts_enabled"]
+                    else None
+                ),
+            )
+
+        return assistant
 
     parser = argparse.ArgumentParser(description="Voice-enabled AI assistant")
     parser.add_argument(
