@@ -1255,6 +1255,7 @@ class VoiceAssistant:
         print(f"\nYou said: {text}")
         if self.web_monitor:
             self.web_monitor.append_dialogue("user", text)
+            self.web_monitor.set_assistant_busy(True)
 
         # Special commands
         if text.lower() in ["exit", "quit", "goodbye"]:
@@ -1371,7 +1372,18 @@ class VoiceAssistant:
 
                 # Process command
                 process_task = asyncio.create_task(self.process_command(text))
+                command_cancelled = False
                 while not process_task.done():
+                    if self.web_monitor and self.web_monitor.pop_cancel_requested():
+                        print("Web monitor cancel requested. Cancelling current command.")
+                        process_task.cancel()
+                        try:
+                            await process_task
+                        except asyncio.CancelledError:
+                            pass
+                        self.web_monitor.set_assistant_busy(False)
+                        command_cancelled = True
+                        break
                     if self.reload_event and self.reload_event.is_set():
                         print("Auto environment reload requested. Cancelling current command.")
                         process_task.cancel()
@@ -1379,17 +1391,25 @@ class VoiceAssistant:
                             await process_task
                         except asyncio.CancelledError:
                             pass
+                        if self.web_monitor:
+                            self.web_monitor.set_assistant_busy(False)
                         return "reload"
                     await asyncio.sleep(0.1)
+
+                if command_cancelled:
+                    continue
 
                 response = await process_task
                 if self.reload_event and self.reload_event.is_set():
                     print("Auto environment reload requested. Discarding current response.")
+                    if self.web_monitor:
+                        self.web_monitor.set_assistant_busy(False)
                     return "reload"
 
                 print(f"\nAssistant: {response}")
                 if self.web_monitor:
                     self.web_monitor.append_dialogue("assistant", response)
+                    self.web_monitor.set_assistant_busy(False)
 
                 # Check for exit
                 if text.lower() in ["exit", "quit", "goodbye"]:

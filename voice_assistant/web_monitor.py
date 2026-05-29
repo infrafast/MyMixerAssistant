@@ -83,6 +83,7 @@ class WebMonitor:
         self._messages: deque[dict[str, Any]] = deque()
         self._next_message_id = 1
         self._injected_commands: deque[str] = deque()
+        self._cancel_requested = False
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._stdout_original: TextIO | None = None
@@ -99,6 +100,7 @@ class WebMonitor:
             "config": {},
             "config_text": "{}",
             "prompt": "",
+            "assistant_busy": False,
             "updated_at": time.time(),
         }
 
@@ -184,6 +186,9 @@ class WebMonitor:
                 def do_POST(self) -> None:
                     if self.path == "/api/inject-command":
                         self._handle_inject_command()
+                        return
+                    if self.path == "/api/cancel-command":
+                        self._handle_cancel_command()
                         return
                     if self.path == "/api/llm-config":
                         self._handle_llm_config_save()
@@ -283,6 +288,10 @@ class WebMonitor:
                     monitor.inject_command(command)
                     self._send_json({"accepted": True})
 
+                def _handle_cancel_command(self) -> None:
+                    monitor.request_cancel()
+                    self._send_json({"accepted": True})
+
             self._server = ThreadingHTTPServer((host, port), MonitorHandler)
             self._thread = threading.Thread(
                 target=self._server.serve_forever,
@@ -350,6 +359,19 @@ class WebMonitor:
             self._snapshot["updated_at"] = time.time()
             return self._injected_commands.popleft()
 
+    def request_cancel(self) -> None:
+        with self._lock:
+            self._cancel_requested = True
+            self._snapshot["updated_at"] = time.time()
+
+    def pop_cancel_requested(self) -> bool:
+        with self._lock:
+            if not self._cancel_requested:
+                return False
+            self._cancel_requested = False
+            self._snapshot["updated_at"] = time.time()
+            return True
+
     def append_dialogue(self, role: str, text: str) -> None:
         cleaned_text = text.strip()
         if not cleaned_text:
@@ -368,6 +390,13 @@ class WebMonitor:
             self._next_message_id += 1
             while len(self._messages) > self.max_messages:
                 self._messages.popleft()
+            self._snapshot["updated_at"] = time.time()
+
+    def set_assistant_busy(self, busy: bool) -> None:
+        with self._lock:
+            self._snapshot["assistant_busy"] = busy
+            if not busy:
+                self._cancel_requested = False
             self._snapshot["updated_at"] = time.time()
 
     def _filter_log_value(self, value: str) -> str:
@@ -591,6 +620,36 @@ INDEX_HTML = """<!doctype html>
     .message-row.pending .bubble {
       opacity: 0.74;
     }
+    .thinking-bubble {
+      min-width: 72px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+    }
+    .thinking-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      opacity: 0.45;
+      animation: thinkingPulse 1.2s infinite ease-in-out;
+    }
+    .thinking-dot:nth-child(2) {
+      animation-delay: 0.16s;
+    }
+    .thinking-dot:nth-child(3) {
+      animation-delay: 0.32s;
+    }
+    @keyframes thinkingPulse {
+      0%, 80%, 100% {
+        transform: translateY(0);
+        opacity: 0.35;
+      }
+      40% {
+        transform: translateY(-4px);
+        opacity: 0.9;
+      }
+    }
     .composer-wrap {
       padding: 12px 16px 18px;
       background: linear-gradient(to top, var(--bg) 78%, rgba(247, 247, 248, 0));
@@ -626,6 +685,10 @@ INDEX_HTML = """<!doctype html>
       color: var(--text);
       line-height: 1.4;
     }
+    #inject-command:disabled {
+      color: var(--muted);
+      cursor: not-allowed;
+    }
     #inject-submit {
       width: 40px;
       height: 40px;
@@ -636,6 +699,17 @@ INDEX_HTML = """<!doctype html>
       color: var(--bg);
       font-size: 18px;
       line-height: 1;
+    }
+    #inject-submit:disabled {
+      background: var(--surface-soft);
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+    #inject-submit.stop-mode {
+      background: var(--surface-soft);
+      color: #000000;
+      border: 1px solid var(--border);
+      font-size: 13px;
     }
     .overlay {
       position: fixed;
@@ -932,6 +1006,8 @@ INDEX_HTML = """<!doctype html>
     let llmOptionsLoading = false;
     let lastServerMessages = [];
     let pendingMessages = [];
+    let composerLocked = false;
+    let cancelRequestInFlight = false;
 
     function escapeHtml(value) {
       return String(value || "")
@@ -966,7 +1042,51 @@ INDEX_HTML = """<!doctype html>
       </div>`;
     }
 
-    function renderMessages(serverMessages) {
+    function thinkingBubble() {
+      return `<div class="message-row assistant pending" aria-live="polite" aria-label="Assistant is thinking">
+        <div class="bubble">
+          <div class="thinking-bubble">
+            <span class="thinking-dot"></span>
+            <span class="thinking-dot"></span>
+            <span class="thinking-dot"></span>
+          </div>
+        </div>
+      </div>`;
+    }
+
+    function setComposerLocked(locked) {
+      composerLocked = Boolean(locked);
+      injectCommand.disabled = composerLocked;
+      injectSubmit.disabled = cancelRequestInFlight;
+      injectSubmit.classList.toggle("stop-mode", composerLocked);
+      injectSubmit.innerHTML = composerLocked ? "&#9632;" : "&#8593;";
+      injectSubmit.title = composerLocked ? "Stop" : "Send";
+      injectSubmit.setAttribute("aria-label", composerLocked ? "Stop" : "Send");
+      injectCommand.placeholder = composerLocked ? "Assistant is thinking..." : "Message";
+    }
+
+    async function cancelCommand() {
+      if (!composerLocked || cancelRequestInFlight) return;
+      cancelRequestInFlight = true;
+      injectSubmit.disabled = true;
+      injectCommand.placeholder = "Cancelling...";
+      try {
+        const response = await fetch("/api/cancel-command", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({})
+        });
+        if (!response.ok) throw new Error(await response.text());
+        await refresh();
+      } catch (error) {
+        metaEl.textContent = `cancel failed: ${error}`;
+      } finally {
+        cancelRequestInFlight = false;
+        setComposerLocked(composerLocked);
+      }
+    }
+
+    function renderMessages(serverMessages, showThinking = false) {
       const knownUserMessages = (serverMessages || []).filter((message) => message.role === "user");
       pendingMessages = pendingMessages.filter((pending) => {
         return !knownUserMessages.some((message) => {
@@ -980,7 +1100,7 @@ INDEX_HTML = """<!doctype html>
       if (rows.length === 0) {
         messagesEl.innerHTML = `<div class="empty-state">Live Stage Assistant</div>`;
       } else {
-        messagesEl.innerHTML = rows.map(messageBubble).join("");
+        messagesEl.innerHTML = rows.map(messageBubble).join("") + (showThinking ? thinkingBubble() : "");
       }
       if (shouldStick) {
         chatScroll.scrollTop = chatScroll.scrollHeight;
@@ -1128,7 +1248,10 @@ INDEX_HTML = """<!doctype html>
         logsEl.value = data.logs || "";
         if (shouldStick) logsEl.scrollTop = logsEl.scrollHeight;
         lastServerMessages = data.messages || [];
-        renderMessages(lastServerMessages);
+        const serverBusy = Boolean(data.assistant_busy);
+        const showThinking = serverBusy || pendingMessages.length > 0;
+        setComposerLocked(showThinking);
+        renderMessages(lastServerMessages, showThinking);
         const updated = data.updated_at ? new Date(data.updated_at * 1000).toLocaleTimeString() : "unknown";
         metaEl.textContent = `updated ${updated} · uptime ${data.uptime_seconds || 0}s`;
       } catch (error) {
@@ -1143,16 +1266,19 @@ INDEX_HTML = """<!doctype html>
     injectCommand.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
-        injectForm.requestSubmit();
+        if (!composerLocked) injectForm.requestSubmit();
       }
     });
 
     injectForm.addEventListener("submit", async (event) => {
       event.preventDefault();
+      if (composerLocked) {
+        await cancelCommand();
+        return;
+      }
       const command = injectCommand.value.trim();
       if (!command) return;
 
-      injectSubmit.disabled = true;
       pendingMessages.push({
         id: `pending-${Date.now()}`,
         role: "user",
@@ -1160,7 +1286,8 @@ INDEX_HTML = """<!doctype html>
         pending: true,
         sentAt: Date.now()
       });
-      renderMessages(lastServerMessages);
+      setComposerLocked(true);
+      renderMessages(lastServerMessages, true);
       try {
         const response = await fetch("/api/inject-command", {
           method: "POST",
@@ -1172,11 +1299,17 @@ INDEX_HTML = """<!doctype html>
         autoSizeComposer();
         await refresh();
       } catch (error) {
+        pendingMessages = pendingMessages.filter((message) => message.text !== command);
+        setComposerLocked(false);
+        renderMessages(lastServerMessages, false);
         metaEl.textContent = `inject failed: ${error}`;
-      } finally {
-        injectSubmit.disabled = false;
-        injectCommand.focus();
       }
+    });
+
+    injectSubmit.addEventListener("click", async (event) => {
+      if (!composerLocked) return;
+      event.preventDefault();
+      await cancelCommand();
     });
 
     settingsOpen.addEventListener("click", () => setSettingsOpen(true));
