@@ -29,14 +29,16 @@ COPY voice_assistant ./voice_assistant
 COPY assets ./assets
 COPY static ./static
 COPY mcp_servers*.json ./
+COPY docker-entrypoint.sh /usr/local/bin/live-stage-assistant-entrypoint
 
 RUN python -m pip install --upgrade pip \
     && python -m pip install .
 
-RUN mkdir -p /data/huggingface /data/cache /data/npm-cache /data/notes
+RUN chmod +x /usr/local/bin/live-stage-assistant-entrypoint \
+    && mkdir -p /data/huggingface /data/cache /data/npm-cache /data/notes
 
 VOLUME ["/config", "/data"]
 
 EXPOSE 8765
 
-CMD ["python", "voice_assistant/agent.py", "--env-file", "/config/.env"]
+ENTRYPOINT ["live-stage-assistant-entrypoint"]

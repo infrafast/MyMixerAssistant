@@ -18,9 +18,9 @@ For a first Synology deployment, use the web monitor and text command injection 
 ## Files
 
 - `Dockerfile`: builds the Python app image with audio, ffmpeg, Node.js, and npm support.
-- `docker-compose.synology.yml`: host-network Synology compose file.
-- `.env.synology.example`: copy to `synology/.env` and edit for the NAS.
-- `mcp_servers.synology.json`: mixer-only MCP config for a mounted XMSeries-MCP checkout.
+- `docker-compose.yml`: host-network Synology compose file.
+- `container/config/.env.infrafast`: edit for the NAS/deployment folder.
+- `container/config/mcp_servers.synology.json`: mixer-only MCP config for a mounted XMSeries-MCP checkout.
 - `.dockerignore`: keeps local virtualenvs, caches, and API key files out of the image.
 
 ## Folder Layout On The NAS
@@ -30,18 +30,34 @@ Create a project folder such as:
 ```text
 /volume1/docker/live-stage-assistant/
   docker-compose.yml
-  synology/
-    .env
+  container/
+    config/
+      .env.infrafast
+      OPENAI_API_KEY.txt
+      ELEVENLABS_API_KEY.txt
+      mcp_servers.synology.json
+    data/
+  assets/
+  XMSeries-MCP/
+```
+
+The `container/` folder contains runtime files and persistent container data:
+
+```text
+container/
+  config/
+    .env.infrafast
     OPENAI_API_KEY.txt
     ELEVENLABS_API_KEY.txt
     mcp_servers.synology.json
   data/
-  XMSeries-MCP/
 ```
 
-Copy `.env.synology.example` to `synology/.env`.
-Copy `mcp_servers.synology.json` to `synology/mcp_servers.synology.json`.
+Edit `container/config/.env.infrafast`.
+Keep `container/config/mcp_servers.synology.json` in the same folder.
 Put API keys in the two text files, or leave the ElevenLabs file empty if `TTS_PROVIDER=none`.
+
+The compose file mounts `./container/config` to `/config:ro` and `./container/data` to `/data`. The Docker image entrypoint starts the assistant with `ASSISTANT_ENV_FILE` when set, defaults to `/config/.env.infrafast`, and otherwise auto-detects the first `/config/.env*` file except `*.example`. Docker Compose `env_file` is intentionally not needed here because the assistant loads the mounted env file itself.
 
 ## XMSeries-MCP
 
@@ -53,13 +69,13 @@ The compose file already includes the commented volume line:
 ```
 
 Enable that line after the folder exists and contains `dist/index.js`.
-The corresponding MCP server path is configured in `synology/mcp_servers.synology.json`, not in the agent `.env` file:
+The corresponding MCP server path is configured in `container/config/mcp_servers.synology.json`, not in the agent `.env` file:
 
 ```json
 "args": ["/xmseries-mcp/dist/index.js"]
 ```
 
-In this stdio setup, the `env` block in `mcp_servers.synology.json` is passed to the XMSeries-MCP child process. It is MCP-server configuration, not Live Stage Assistant application configuration.
+In this stdio setup, the `env` block in `container/config/mcp_servers.synology.json` is passed to the XMSeries-MCP child process. It is MCP-server configuration, not Live Stage Assistant application configuration.
 
 If XMSeries-MCP runs as a separate HTTP service/container, put `OSC_HOST`, `OSC_PORT`, `OSC_PROTOCOL`, and related mixer settings on that XMSeries-MCP service instead. In that case, the assistant MCP config should only point to the HTTP endpoint:
 
@@ -82,7 +98,7 @@ If XMSeries-MCP runs as a separate HTTP service/container, put `OSC_HOST`, `OSC_
 From SSH:
 
 ```bash
-docker compose -f docker-compose.synology.yml up --build -d
+docker compose up --build -d
 docker logs -f live-stage-assistant
 ```
 

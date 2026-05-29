@@ -113,21 +113,15 @@ uv pip install .
 ### Docker / Synology Quick Start
 
 The Docker setup is designed so API keys stay in text files on the host machine and are mounted into the container.
-Do not put the raw OpenAI or ElevenLabs key value directly in `docker-compose.synology.yml`.
+Do not put the raw OpenAI or ElevenLabs key value directly in `docker-compose.yml`.
 
-Create a local Docker config folder:
+Edit `container/config/.env.infrafast` for your NAS/deployment settings.
 
-```bash
-mkdir -p synology data
-cp .env.synology.example synology/.env
-cp mcp_servers.synology.json synology/mcp_servers.synology.json
-```
-
-Put the API keys in files inside the mounted `synology/` folder:
+Put the API keys in files inside the mounted `container/config/` folder:
 
 ```bash
-printf '%s' 'your-openai-api-key' > synology/OPENAI_API_KEY.txt
-printf '%s' 'your-elevenlabs-api-key' > synology/ELEVENLABS_API_KEY.txt
+printf '%s' 'your-openai-api-key' > container/config/OPENAI_API_KEY.txt
+printf '%s' 'your-elevenlabs-api-key' > container/config/ELEVENLABS_API_KEY.txt
 ```
 
 The Docker env file points to those mounted files from inside the container:
@@ -137,22 +131,24 @@ OPENAI_API_KEY_FILE=/config/OPENAI_API_KEY.txt
 ELEVENLABS_API_KEY_FILE=/config/ELEVENLABS_API_KEY.txt
 ```
 
-`docker-compose.synology.yml` mounts `./synology` to `/config`, so the assistant reads:
+`docker-compose.yml` mounts `./container/config` to `/config`, so the assistant reads:
 
 ```text
-host:      ./synology/OPENAI_API_KEY.txt
+host:      ./container/config/OPENAI_API_KEY.txt
 container: /config/OPENAI_API_KEY.txt
 
-host:      ./synology/ELEVENLABS_API_KEY.txt
+host:      ./container/config/ELEVENLABS_API_KEY.txt
 container: /config/ELEVENLABS_API_KEY.txt
 ```
+
+The Docker image entrypoint uses `ASSISTANT_ENV_FILE` when set, defaults to `/config/.env.infrafast`, and if that file is missing it auto-detects the first `/config/.env*` file except `*.example`. Docker Compose `env_file` is intentionally not needed here because the assistant loads the mounted env file itself.
 
 The assistant can run without working audio devices: if microphone capture fails because no input device is available, it falls back to text commands from the web monitor or terminal; if speech playback is unavailable, responses are still printed in the console and monitor. For a first run on Synology or another headless Docker host, `TTS_PROVIDER=none` is only the quietest starting point while you validate the container, MCP, and web monitor. Microphone and speaker passthrough can be tested later.
 
 Build and start:
 
 ```bash
-docker compose -f docker-compose.synology.yml up --build -d
+docker compose up --build -d
 docker logs -f live-stage-assistant
 ```
 
@@ -162,26 +158,26 @@ Open the monitor from your browser:
 http://NAS_IP:8765
 ```
 
-If you use the mixer MCP server, clone/install/build `XMSeries-MCP` on the host and mount it in `docker-compose.synology.yml`:
+If you use the mixer MCP server, clone/install/build `XMSeries-MCP` on the host and mount it in `docker-compose.yml`:
 
 ```yaml
 volumes:
   - ./XMSeries-MCP:/xmseries-mcp:ro
 ```
 
-Then keep this value in `synology/.env`:
+Then keep this value in `.env`:
 
 ```env
 MCP_CONFIG=/config/mcp_servers.synology.json
 ```
 
-The server script path itself belongs in `synology/mcp_servers.synology.json`, for example:
+The server script path itself belongs in `container/config/mcp_servers.synology.json`, for example:
 
 ```json
 "args": ["/xmseries-mcp/dist/index.js"]
 ```
 
-In stdio mode, mixer connection settings such as `OSC_HOST`, `OSC_PORT`, and `OSC_PROTOCOL` belong in the `env` block of `synology/mcp_servers.synology.json`; that block is passed to the XMSeries-MCP process. If XMSeries-MCP runs as a separate HTTP service/container, put those OSC settings on the XMSeries-MCP service instead and configure Live Stage Assistant with only the MCP HTTP URL.
+In stdio mode, mixer connection settings such as `OSC_HOST`, `OSC_PORT`, and `OSC_PROTOCOL` belong in the `env` block of `container/config/mcp_servers.synology.json`; that block is passed to the XMSeries-MCP process. If XMSeries-MCP runs as a separate HTTP service/container, put those OSC settings on the XMSeries-MCP service instead and configure Live Stage Assistant with only the MCP HTTP URL.
 
 On DSM 7.0, the exact Docker UI depends on the Synology model and installed Docker package. If the Container Manager "Project" interface is not available, use SSH and the `docker compose` command above, or create an equivalent container manually with the same mounts, host network, and port `8765`.
 
@@ -274,7 +270,7 @@ LINEAR_API_KEY=your-linear-api-key              # For Linear integration
 
 The assistant is configured from an environment file. The CLI intentionally accepts only `--env-file` plus `--help`, so the selected `.env` file is the single source of truth for runtime settings.
 
-API secrets are read through `OPENAI_API_KEY_FILE` and `ELEVENLABS_API_KEY_FILE`. These variables must contain paths to text files that contain the secret, not the secret value itself. In Docker/Synology deployments, place those files in the mounted config folder on the host, for example `./synology/OPENAI_API_KEY.txt`, and point the container env file to `/config/OPENAI_API_KEY.txt`.
+API secrets are read through `OPENAI_API_KEY_FILE` and `ELEVENLABS_API_KEY_FILE`. These variables must contain paths to text files that contain the secret, not the secret value itself. In Docker/Synology deployments, place those files in the mounted config folder on the host, for example `./container/config/OPENAI_API_KEY.txt`, and point the container env file to `/config/OPENAI_API_KEY.txt`.
 
 The assistant treats current external state as time-sensitive. Conversation memory can preserve context and follow-up references, but when the user asks for the current state of anything outside the conversation, the agent is instructed to call the relevant MCP read tool before answering. Set `MCP_AGENT_MEMORY_ENABLED=false` only if you want to disable MCPAgent conversation memory entirely.
 

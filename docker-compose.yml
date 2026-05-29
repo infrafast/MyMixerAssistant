@@ -7,20 +7,19 @@ services:
     container_name: live-stage-assistant
     restart: unless-stopped
     network_mode: host
-    env_file:
-      - ./synology/.env
     volumes:
-      - ./synology:/config:ro
-      - ./data:/data
+      - ./container/config:/config:ro
+      - ./container/data:/data
       - ./assets:/app/assets:ro
       # Optional: mount a built XMSeries-MCP checkout here.
       # - ./XMSeries-MCP:/xmseries-mcp:ro
-    devices:
+    #devices:
       # Optional, required only if you want microphone/speaker access from the NAS.
-      - /dev/snd:/dev/snd
-    group_add:
-      - audio
+    #  - /dev/snd:/dev/snd
+    #group_add:
+    #  - audio
     environment:
+      ASSISTANT_ENV_FILE: /config/.env.infrafast
       HF_HOME: /data/huggingface
       XDG_CACHE_HOME: /data/cache
       NPM_CONFIG_CACHE: /data/npm-cache
