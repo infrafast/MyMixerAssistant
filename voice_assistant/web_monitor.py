@@ -93,7 +93,7 @@ class WebMonitor:
         self._stderr_original: TextIO | None = None
         self._logging_handler_streams: list[tuple[logging.StreamHandler, TextIO]] = []
         self._llm_options_handler: Callable[[str | None], dict[str, Any]] | None = None
-        self._llm_config_save_handler: Callable[[str, str, str, str], dict[str, Any]] | None = None
+        self._llm_config_save_handler: Callable[[str, str, str, str, str, float], dict[str, Any]] | None = None
         self._web_audio_transcribe_handler: Callable[[bytes, str, bool], dict[str, Any]] | None = None
         self._web_audio_tts_handler: Callable[[str], dict[str, Any]] | None = None
         self._started_at = time.time()
@@ -114,7 +114,7 @@ class WebMonitor:
         self,
         *,
         options_handler: Callable[[str | None], dict[str, Any]],
-        save_handler: Callable[[str, str, str, str], dict[str, Any]],
+        save_handler: Callable[[str, str, str, str, str, float], dict[str, Any]],
     ) -> None:
         """Register callbacks used by the web UI to list and save LLM settings."""
         with self._lock:
@@ -319,9 +319,22 @@ class WebMonitor:
                         return
                     voice_id = str(payload.get("voice_id") or "").strip()
                     thinking_sound_file = str(payload.get("thinking_sound_file") or "").strip()
+                    openai_tts_voice = str(payload.get("openai_tts_voice") or "").strip()
+                    try:
+                        openai_tts_speed = float(payload.get("openai_tts_speed") or 1.0)
+                    except (TypeError, ValueError):
+                        self.send_error(400, "OpenAI TTS speed must be a number")
+                        return
 
                     try:
-                        result = handler(provider, model, voice_id, thinking_sound_file)
+                        result = handler(
+                            provider,
+                            model,
+                            voice_id,
+                            thinking_sound_file,
+                            openai_tts_voice,
+                            openai_tts_speed,
+                        )
                     except ValueError as e:
                         self.send_error(400, str(e))
                         return
@@ -1121,6 +1134,14 @@ INDEX_HTML = """<!doctype html>
                 <select id="elevenlabs-voice"></select>
               </div>
               <div class="field">
+                <label for="openai-tts-voice">OpenAI Voice</label>
+                <select id="openai-tts-voice"></select>
+              </div>
+              <div class="field">
+                <label for="openai-tts-speed">OpenAI Speed <span id="openai-tts-speed-label">1.0x</span></label>
+                <input id="openai-tts-speed" type="range" min="0.6" max="1.8" step="0.05" value="1">
+              </div>
+              <div class="field">
                 <label for="thinking-sound">Thinking Sound</label>
                 <select id="thinking-sound"></select>
               </div>
@@ -1154,6 +1175,9 @@ INDEX_HTML = """<!doctype html>
     const llmProvider = document.querySelector("#llm-provider");
     const llmModel = document.querySelector("#llm-model");
     const elevenlabsVoice = document.querySelector("#elevenlabs-voice");
+    const openaiTtsVoice = document.querySelector("#openai-tts-voice");
+    const openaiTtsSpeed = document.querySelector("#openai-tts-speed");
+    const openaiTtsSpeedLabel = document.querySelector("#openai-tts-speed-label");
     const thinkingSound = document.querySelector("#thinking-sound");
     const llmSave = document.querySelector("#llm-save");
     const llmMessage = document.querySelector("#llm-message");
@@ -1618,6 +1642,7 @@ INDEX_HTML = """<!doctype html>
         const data = await response.json();
         if (!data.audio_base64 || !data.mime_type) return;
         const audio = new Audio(`data:${data.mime_type};base64,${data.audio_base64}`);
+        audio.playbackRate = Math.max(0.6, Math.min(1.8, Number(webAudio.tts_speed || 1)));
         await new Promise((resolve, reject) => {
           audio.addEventListener("ended", resolve, { once: true });
           audio.addEventListener("error", reject, { once: true });
@@ -1708,6 +1733,10 @@ INDEX_HTML = """<!doctype html>
       return opt;
     }
 
+    function syncOpenAiSpeedLabel() {
+      openaiTtsSpeedLabel.textContent = `${Number(openaiTtsSpeed.value || 1).toFixed(2)}x`;
+    }
+
     function autoSizeComposer() {
       injectCommand.style.height = "0px";
       injectCommand.style.height = `${Math.min(injectCommand.scrollHeight, 160)}px`;
@@ -1737,6 +1766,8 @@ INDEX_HTML = """<!doctype html>
       llmProvider.disabled = true;
       llmModel.disabled = true;
       elevenlabsVoice.disabled = true;
+      openaiTtsVoice.disabled = true;
+      openaiTtsSpeed.disabled = true;
       thinkingSound.disabled = true;
       llmSave.disabled = true;
       llmMessage.textContent = "Loading LLM options...";
@@ -1786,6 +1817,22 @@ INDEX_HTML = """<!doctype html>
           }
         }
 
+        openaiTtsVoice.replaceChildren();
+        const selectedOpenAiTtsVoice = data.selected_openai_tts_voice || "";
+        const openAiVoices = data.openai_tts_voices || [];
+        if (openAiVoices.length === 0) {
+          openaiTtsVoice.appendChild(option("No voice available", "", true, true));
+        } else {
+          for (const voice of openAiVoices) {
+            openaiTtsVoice.appendChild(option(voice.label || voice.id, voice.id, false, voice.id === selectedOpenAiTtsVoice));
+          }
+          if (selectedOpenAiTtsVoice && !openAiVoices.some((voice) => voice.id === selectedOpenAiTtsVoice)) {
+            openaiTtsVoice.appendChild(option(`${selectedOpenAiTtsVoice} (current)`, selectedOpenAiTtsVoice, false, true));
+          }
+        }
+        openaiTtsSpeed.value = String(data.selected_openai_tts_speed || 1.0);
+        syncOpenAiSpeedLabel();
+
         thinkingSound.replaceChildren();
         const selectedThinkingSound = data.selected_thinking_sound_file || "";
         const sounds = data.thinking_sounds || [];
@@ -1807,6 +1854,8 @@ INDEX_HTML = """<!doctype html>
         llmProvider.disabled = false;
         llmModel.disabled = llmModel.options.length === 0 || !llmModel.value;
         elevenlabsVoice.disabled = elevenlabsVoice.options.length === 0 || !elevenlabsVoice.value;
+        openaiTtsVoice.disabled = openaiTtsVoice.options.length === 0 || !openaiTtsVoice.value;
+        openaiTtsSpeed.disabled = false;
         thinkingSound.disabled = thinkingSound.options.length === 0 || !thinkingSound.value;
         llmSave.disabled = !llmProvider.value;
         llmOptionsLoading = false;
@@ -1939,6 +1988,8 @@ INDEX_HTML = """<!doctype html>
       const model = llmModel.value;
       const voiceId = elevenlabsVoice.value;
       const thinkingSoundFile = thinkingSound.value;
+      const openAiTtsVoiceValue = openaiTtsVoice.value;
+      const openAiTtsSpeedValue = Number(openaiTtsSpeed.value || 1);
       if (!provider) return;
 
       llmSave.disabled = true;
@@ -1951,7 +2002,9 @@ INDEX_HTML = """<!doctype html>
             provider,
             model,
             voice_id: voiceId,
-            thinking_sound_file: thinkingSoundFile
+            thinking_sound_file: thinkingSoundFile,
+            openai_tts_voice: openAiTtsVoiceValue,
+            openai_tts_speed: openAiTtsSpeedValue
           })
         });
         if (!response.ok) throw new Error(await response.text());
@@ -1964,6 +2017,8 @@ INDEX_HTML = """<!doctype html>
         llmSave.disabled = !llmProvider.value;
       }
     });
+
+    openaiTtsSpeed.addEventListener("input", syncOpenAiSpeedLabel);
   </script>
 </body>
 </html>

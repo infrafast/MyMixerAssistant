@@ -93,6 +93,12 @@ DEFAULT_VOICE_CANCEL_WORDS = (
     "arrêter",
     "cancel",
 )
+OPENAI_TTS_VOICE_OPTIONS = [
+    {"id": "echo", "label": "Echo (masculine)"},
+    {"id": "onyx", "label": "Onyx (masculine)"},
+    {"id": "nova", "label": "Nova (feminine)"},
+    {"id": "shimmer", "label": "Shimmer (feminine)"},
+]
 
 
 @contextmanager
@@ -1711,6 +1717,15 @@ async def main():
             print(f"Error: {name} must be a number, got: {value}")
             sys.exit(1)
 
+    def env_float_from_values(values: dict, name: str, default: float) -> float:
+        value = values.get(name)
+        if value is None or str(value).strip() == "":
+            return default
+        try:
+            return float(str(value).strip())
+        except ValueError:
+            return default
+
     def env_optional(name: str) -> str | None:
         value = os.getenv(name)
         if value is None or value.strip() == "":
@@ -1840,6 +1855,8 @@ async def main():
         current_model = (values.get("OPENAI_MODEL") or "gpt-4o-mini").strip()
         current_voice_id = (values.get("ELEVENLABS_VOICE_ID") or DEFAULT_ELEVENLABS_VOICE_ID).strip()
         current_thinking_sound_file = (values.get("THINKING_SOUND_FILE") or "thinking.wav").strip()
+        current_openai_tts_voice = (values.get("WEB_TTS_VOICE") or "alloy").strip()
+        current_openai_tts_speed = env_float_from_values(values, "WEB_TTS_SPEED", 1.0)
         internet_online = check_internet_connection()
 
         provider_entries = [
@@ -1875,6 +1892,9 @@ async def main():
             "selected_model": current_model if provider == current_provider else "",
             "voices": list_elevenlabs_voice_options(values),
             "selected_voice_id": current_voice_id,
+            "openai_tts_voices": OPENAI_TTS_VOICE_OPTIONS,
+            "selected_openai_tts_voice": current_openai_tts_voice,
+            "selected_openai_tts_speed": current_openai_tts_speed,
             "thinking_sounds": list_thinking_sound_options(),
             "selected_thinking_sound_file": current_thinking_sound_file,
             "message": message,
@@ -1886,6 +1906,8 @@ async def main():
         model: str,
         voice_id: str,
         thinking_sound_file: str,
+        openai_tts_voice: str,
+        openai_tts_speed: float,
         web_monitor: WebMonitor | None,
         reload_event: threading.Event | None,
     ) -> dict[str, Any]:
@@ -1893,6 +1915,8 @@ async def main():
         model = model.strip()
         voice_id = voice_id.strip()
         thinking_sound_file = thinking_sound_file.strip()
+        openai_tts_voice = (openai_tts_voice or "").strip()
+        openai_tts_speed = max(0.6, min(1.8, float(openai_tts_speed or 1.0)))
         if provider not in {"openai", "ollama"}:
             raise ValueError(f"unsupported LLM provider: {provider}")
 
@@ -1926,6 +1950,11 @@ async def main():
         if thinking_sound_options and thinking_sound_file not in {item["id"] for item in thinking_sound_options}:
             raise ValueError(f"thinking sound '{thinking_sound_file}' is not a WAV file in assets/")
 
+        if not openai_tts_voice:
+            openai_tts_voice = (values.get("WEB_TTS_VOICE") or "alloy").strip()
+        if openai_tts_voice not in {item["id"] for item in OPENAI_TTS_VOICE_OPTIONS}:
+            raise ValueError(f"OpenAI TTS voice '{openai_tts_voice}' is not available in the web config")
+
         update_env_file_values(
             env_file,
             {
@@ -1933,6 +1962,8 @@ async def main():
                 "OPENAI_MODEL": model,
                 "ELEVENLABS_VOICE_ID": voice_id,
                 "THINKING_SOUND_FILE": thinking_sound_file,
+                "WEB_TTS_VOICE": openai_tts_voice,
+                "WEB_TTS_SPEED": f"{openai_tts_speed:.2f}",
             },
         )
         values = dict(dotenv_values(env_file))
@@ -1959,6 +1990,8 @@ async def main():
             "model": model,
             "voice_id": voice_id,
             "thinking_sound_file": thinking_sound_file,
+            "openai_tts_voice": openai_tts_voice,
+            "openai_tts_speed": openai_tts_speed,
             "message": "Configuration saved. Restarting assistant with the new settings.",
         }
 
@@ -2005,6 +2038,7 @@ async def main():
         web_tts_provider = os.getenv("WEB_TTS_PROVIDER", "openai").strip().lower()
         web_tts_voice = os.getenv("WEB_TTS_VOICE", "alloy").strip()
         web_tts_model = os.getenv("WEB_TTS_MODEL", "gpt-4o-mini-tts").strip()
+        web_tts_speed = max(0.6, min(1.8, env_float("WEB_TTS_SPEED", 1.0)))
         web_stt_model = os.getenv("WEB_STT_MODEL", "whisper-1").strip()
         web_recording_max_seconds = env_float("WEB_RECORDING_MAX_SECONDS", 8.0)
         web_conversation_silence_ms = env_int("WEB_CONVERSATION_SILENCE_MS", 900)
@@ -2072,6 +2106,7 @@ async def main():
             "tts_blocked_by_backend": web_audio_enabled and backend_tts_active,
             "stt_provider": web_stt_provider if web_audio_enabled else "none",
             "tts_provider": web_tts_provider if web_audio_enabled and not backend_tts_active else "none",
+            "tts_speed": web_tts_speed,
             "max_record_seconds": web_recording_max_seconds,
             "conversation_silence_ms": web_conversation_silence_ms,
             "conversation_idle_seconds": web_conversation_idle_seconds,
@@ -2220,12 +2255,14 @@ async def main():
     if web_monitor:
         web_monitor.set_llm_config_handlers(
             options_handler=lambda provider=None: build_llm_options(env_file, provider),
-            save_handler=lambda provider, model, voice_id, thinking_sound_file: save_llm_config(
+            save_handler=lambda provider, model, voice_id, thinking_sound_file, openai_tts_voice, openai_tts_speed: save_llm_config(
                 env_file,
                 provider,
                 model,
                 voice_id,
                 thinking_sound_file,
+                openai_tts_voice,
+                openai_tts_speed,
                 web_monitor,
                 reload_event,
             ),

@@ -264,6 +264,7 @@ WEB_CONVERSATION_THRESHOLD=0.035               # Browser-side RMS speech thresho
 WEB_TTS_PROVIDER=openai
 WEB_TTS_MODEL=gpt-4o-mini-tts
 WEB_TTS_VOICE=alloy
+WEB_TTS_SPEED=1.00
 
 # Optional - Assistant Configuration
 WAKE_WORD=                                      # Empty keeps current behavior; set e.g. "Mixeur" to gate commands
@@ -355,6 +356,7 @@ WEB_CONVERSATION_THRESHOLD=0.035
 WEB_TTS_PROVIDER=openai
 WEB_TTS_MODEL=gpt-4o-mini-tts
 WEB_TTS_VOICE=alloy
+WEB_TTS_SPEED=1.00
 ```
 
 The browser microphone path requires browser microphone permission and a browser that supports `MediaRecorder`. Depending on the browser, microphone access may require HTTPS when the monitor is opened from another machine over the LAN. Push-to-talk recording starts when the microphone button is pressed, stops when the square button is pressed again, stops automatically after end-of-speech silence, and still has `WEB_RECORDING_MAX_SECONDS` as a hard timeout to avoid accidental endless recordings.
@@ -362,6 +364,8 @@ The browser microphone path requires browser microphone permission and a browser
 The conversation button next to the microphone enables continuous browser listening. In this mode the push-to-talk button is disabled, the browser detects speech/silence locally, sends each detected utterance to the backend, and then restarts listening after the assistant is done. If `WAKE_WORD` is configured, conversation-mode transcriptions must pass the same wake-word gate before being injected. Manual push-to-talk remains direct command input and does not require the wake word.
 
 Backend TTS has priority over web TTS. If `TTS_PROVIDER` is `elevenlabs` or `pyttsx3`, the monitor still allows browser STT, but web TTS is disabled to avoid double audio. To let the browser play assistant responses, set `TTS_PROVIDER=none` and enable `WEB_AUDIO_ENABLED=true` with `WEB_TTS_PROVIDER=openai`.
+
+The config page exposes four built-in OpenAI web TTS voices: `echo`, `onyx`, `nova`, and `shimmer`. It also exposes `WEB_TTS_SPEED`, applied by the browser playback engine from slow to fast. OpenAI voice choices are built-in values rather than fetched dynamically like ElevenLabs voice IDs.
 
 If the backend or selected profile cannot reach OpenAI, browser audio falls back to silent text chat. The main chat input and stop button remain usable over the local network.
 
