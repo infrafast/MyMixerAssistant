@@ -181,6 +181,8 @@ The server script path itself belongs in `synology/mcp_servers.synology.json`, f
 "args": ["/xmseries-mcp/dist/index.js"]
 ```
 
+In stdio mode, mixer connection settings such as `OSC_HOST`, `OSC_PORT`, and `OSC_PROTOCOL` belong in the `env` block of `synology/mcp_servers.synology.json`; that block is passed to the XMSeries-MCP process. If XMSeries-MCP runs as a separate HTTP service/container, put those OSC settings on the XMSeries-MCP service instead and configure Live Stage Assistant with only the MCP HTTP URL.
+
 On DSM 7.0, the exact Docker UI depends on the Synology model and installed Docker package. If the Container Manager "Project" interface is not available, use SSH and the `docker compose` command above, or create an equivalent container manually with the same mounts, host network, and port `8765`.
 
 ### Offline Preparation

@@ -59,6 +59,24 @@ The corresponding MCP server path is configured in `synology/mcp_servers.synolog
 "args": ["/xmseries-mcp/dist/index.js"]
 ```
 
+In this stdio setup, the `env` block in `mcp_servers.synology.json` is passed to the XMSeries-MCP child process. It is MCP-server configuration, not Live Stage Assistant application configuration.
+
+If XMSeries-MCP runs as a separate HTTP service/container, put `OSC_HOST`, `OSC_PORT`, `OSC_PROTOCOL`, and related mixer settings on that XMSeries-MCP service instead. In that case, the assistant MCP config should only point to the HTTP endpoint:
+
+```json
+{
+  "mcpServers": {
+    "mixer": {
+      "type": "streamable-http",
+      "url": "http://NAS_IP:8787/mcp",
+      "headers": {
+        "Authorization": "Bearer change-me"
+      }
+    }
+  }
+}
+```
+
 ## Start
 
 From SSH:
