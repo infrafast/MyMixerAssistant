@@ -110,6 +110,74 @@ uv pip install -e .
 uv pip install .
 ```
 
+### Docker / Synology Quick Start
+
+The Docker setup is designed so API keys stay in text files on the host machine and are mounted into the container.
+Do not put the raw OpenAI or ElevenLabs key value directly in `docker-compose.synology.yml`.
+
+Create a local Docker config folder:
+
+```bash
+mkdir -p synology data
+cp .env.synology.example synology/.env
+cp mcp_servers.synology.json synology/mcp_servers.synology.json
+```
+
+Put the API keys in files inside the mounted `synology/` folder:
+
+```bash
+printf '%s' 'your-openai-api-key' > synology/OPENAI_API_KEY.txt
+printf '%s' 'your-elevenlabs-api-key' > synology/ELEVENLABS_API_KEY.txt
+```
+
+The Docker env file points to those mounted files from inside the container:
+
+```env
+OPENAI_API_KEY_FILE=/config/OPENAI_API_KEY.txt
+ELEVENLABS_API_KEY_FILE=/config/ELEVENLABS_API_KEY.txt
+```
+
+`docker-compose.synology.yml` mounts `./synology` to `/config`, so the assistant reads:
+
+```text
+host:      ./synology/OPENAI_API_KEY.txt
+container: /config/OPENAI_API_KEY.txt
+
+host:      ./synology/ELEVENLABS_API_KEY.txt
+container: /config/ELEVENLABS_API_KEY.txt
+```
+
+For a first run on Synology or another headless Docker host, keep `TTS_PROVIDER=none` in `synology/.env` and use the web monitor's text command injection. Microphone and speaker passthrough can be tested later.
+
+Build and start:
+
+```bash
+docker compose -f docker-compose.synology.yml up --build -d
+docker logs -f live-stage-assistant
+```
+
+Open the monitor from your browser:
+
+```text
+http://NAS_IP:8765
+```
+
+If you use the mixer MCP server, clone/install/build `XMSeries-MCP` on the host and mount it in `docker-compose.synology.yml`:
+
+```yaml
+volumes:
+  - ./XMSeries-MCP:/xmseries-mcp:ro
+```
+
+Then keep this value in `synology/.env`:
+
+```env
+XMSERIES_MCP_PATH=/xmseries-mcp
+MCP_CONFIG=/config/mcp_servers.synology.json
+```
+
+On DSM 7.0, the exact Docker UI depends on the Synology model and installed Docker package. If the Container Manager "Project" interface is not available, use SSH and the `docker compose` command above, or create an equivalent container manually with the same mounts, host network, and port `8765`.
+
 ### Offline Preparation
 
 Offline mode works only after the required Python packages, Node packages, Ollama model, and Whisper model are already available locally.
@@ -198,6 +266,8 @@ LINEAR_API_KEY=your-linear-api-key              # For Linear integration
 ```
 
 The assistant is configured from an environment file. The CLI intentionally accepts only `--env-file` plus `--help`, so the selected `.env` file is the single source of truth for runtime settings.
+
+API secrets are read through `OPENAI_API_KEY_FILE` and `ELEVENLABS_API_KEY_FILE`. These variables must contain paths to text files that contain the secret, not the secret value itself. In Docker/Synology deployments, place those files in the mounted config folder on the host, for example `./synology/OPENAI_API_KEY.txt`, and point the container env file to `/config/OPENAI_API_KEY.txt`.
 
 The assistant treats current external state as time-sensitive. Conversation memory can preserve context and follow-up references, but when the user asks for the current state of anything outside the conversation, the agent is instructed to call the relevant MCP read tool before answering. Set `MCP_AGENT_MEMORY_ENABLED=false` only if you want to disable MCPAgent conversation memory entirely.
 

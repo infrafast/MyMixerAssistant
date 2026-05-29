@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "mixer": {
+      "command": "node",
+      "args": [
+        "${XMSERIES_MCP_PATH}/dist/index.js"
+      ],
+      "env": {
+        "OSC_HOST": "192.168.0.1",
+        "OSC_PORT": "10023",
+        "OSC_PROTOCOL": "OSCX32M32",
+        "DEBUG": "${DEBUG}"
+      },
+      "assistantPrompt": {
+        "promptName": "xmseries_mixer_assistant",
+        "resourceUri": "xmseries://prompt/system",
+        "tool": "osc_get_agent_prompt"
+      }
+    }
+  }
+}
